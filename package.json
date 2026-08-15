@@ -1,0 +1,55 @@
+{
+  "name": "deepcode",
+  "version": "0.1.0",
+  "description": "Claude Code-style TypeScript TUI coding agent: multi-provider (DeepSeek/Anthropic/Gemini/Grok/Ollama), MCP, Skills, Plugins, Agent Memory, Prompt Caching, auto context compaction",
+  "type": "module",
+  "bin": {
+    "deepcode": "bin/deepcode.cjs"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "bin",
+    "skills",
+    "plugins"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "doctor": "tsx src/cli.ts doctor"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "@google/genai": "^1.9.0",
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "commander": "^14.0.0",
+    "diff": "^8.0.0",
+    "gpt-tokenizer": "^2.9.0",
+    "ignore": "^7.0.0",
+    "ink": "^6.0.0",
+    "openai": "^6.0.0",
+    "playwright-core": "^1.54.0",
+    "react": "^19.0.0",
+    "simple-git": "^3.28.0",
+    "yaml": "^2.8.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "ink-testing-library": "^4.0.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}
