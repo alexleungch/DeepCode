@@ -12,6 +12,21 @@ Claude Code-style TypeScript terminal coding agent CLI. ReAct agent loop + multi
 [usage] in 45k / out 12k · cache↗ 30k · $0.02
 ```
 
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Usage Examples](#usage-examples)
+- [TUI Slash Commands](#tui-slash-commands)
+- [Skills / Plugins / MCP](#skills--plugins--mcp)
+- [Caching & Compaction (cost optimization)](#caching--compaction-cost-optimization)
+- [Directory Structure](#directory-structure)
+- [Testing](#testing)
+- [Contributing](#contributing)
+- [Documentation](#documentation)
+- [License](#license)
+
 ## Features
 
 | Capability | Description |
@@ -31,21 +46,76 @@ Claude Code-style TypeScript terminal coding agent CLI. ReAct agent loop + multi
 | **Sub-agents + Worktree** | Spawn parallel independent sub-agents; clean git repos automatically get worktree isolation, merged after approval |
 | **TUI / headless dual mode** | Ink TUI (streaming/history/slash commands/ESC interrupt) and `--print` script mode share the same engine |
 
+## Installation
+
+### Prerequisites
+
+- **Node.js ≥ 20** (ESM-only runtime; `node:sqlite` is used for memory persistence)
+- **pnpm** (recommended package manager — the repo ships a `pnpm-lock.yaml`; `npm`/`yarn` work as well)
+
+```bash
+node --version   # >= 20
+pnpm --version
+```
+
+### Option A — Global install from the npm registry
+
+```bash
+pnpm add -g deepcode
+# or
+npm install -g deepcode
+```
+
+This exposes the `deepcode` binary on your `PATH`.
+
+### Option B — From source (recommended for development)
+
+```bash
+git clone <your-repo-url> deepcode
+cd deepcode
+pnpm install
+pnpm build          # bundles src/ → dist/ (tsup)
+```
+
+Then make the CLI available globally (optional):
+
+```bash
+pnpm link --global
+```
+
+Or run it without installing:
+
+```bash
+pnpm start          # node dist/cli.js
+pnpm dev            # tsx src/cli.ts (watch-free, no build needed)
+```
+
+### Verify the installation
+
+```bash
+deepcode --version          # 0.1.0
+deepcode doctor             # health check: config, provider keys, permissions, git
+```
+
+If you run the CLI before building, the startup shim prints a hint:
+
+```
+[deepcode] startup failed (dist not built? run pnpm build first)
+```
+
 ## Quick Start
 
 ```bash
-# 1. Build
-pnpm install
-pnpm build
+# 1. Generate a config file
+deepcode config init          # creates ~/.deepcode/config.json template
 
-# 2. Configure (choose any provider)
-deepcode config init          # generates ~/.deepcode/config.json template
+# 2. Provide an API key (choose any provider)
 set DEEPSEEK_API_KEY=sk-xxx   # or edit the config file (env:VAR references supported)
 
 # 3. Zero-cost start: local Ollama
 deepcode --provider ollama --model qwen3:32b
 
-# 4. Usage
+# 4. Go
 deepcode "Explain this project's structure"           # TUI interactive (start working with a prompt)
 deepcode -p "Fix the bug in src/main.ts"              # headless print mode (scripts/CI)
 deepcode --continue                                   # resume the most recent session (memory auto-injected)
@@ -77,7 +147,130 @@ deepcode "Refactor" --permission-mode acceptEdits     # skip approval for file e
 }
 ```
 
-## TUI slash commands
+> **Tip:** use `"apiKey": "env:VAR_NAME"` to reference environment variables instead of storing plaintext keys.
+
+## Usage Examples
+
+### 1. Interactive TUI
+
+```bash
+deepcode                              # start an empty session
+deepcode "Draft a README for src/"    # start a session with an initial prompt
+```
+
+In the TUI you get streaming output, history, slash commands and `ESC` to interrupt the current generation or tool execution.
+
+### 2. Headless / script mode
+
+`--print` (`-p`) runs the same engine with plain-text output — ideal for scripts and CI:
+
+```bash
+deepcode -p "Add JSDoc to every exported function in src/utils.ts"
+deepcode -p "Summarize git diff HEAD~3" --permission-mode plan
+```
+
+### 3. Session management
+
+```bash
+deepcode --continue                  # resume the most recent session (memory auto-injected)
+deepcode --resume <session-id>       # resume a specific session
+deepcode sessions list               # list all sessions
+deepcode sessions show <session-id>  # inspect a session transcript
+deepcode sessions rm <session-id>    # delete a session
+```
+
+### 4. Permission modes
+
+```bash
+deepcode "Fix all failing tests"                                  # ask (default): approve each write/command
+deepcode "Refactor" --permission-mode acceptEdits                 # auto-accept file edits, still ask for commands
+deepcode "Plan an approach" --permission-mode plan                # read-only planning, no mutations
+deepcode "Deploy" --permission-mode bypassPermissions             # no approval prompts (CI, trusted tasks)
+```
+
+### 5. Switching providers and models
+
+```bash
+deepcode --provider anthropic --model claude-sonnet-4-5
+deepcode --provider ollama --model qwen3:32b
+deepcode --provider deepseek --model deepseek-reasoner
+```
+
+Or at runtime inside the TUI: `/models deepseek deepseek-reasoner` (prompts for the model and, if needed, the API key).
+
+### 6. Configuration
+
+```bash
+deepcode config init                  # generate the template config
+deepcode config show                  # print the merged config (defaults → user → project → env → CLI)
+deepcode config set provider deepseek # set a single key
+```
+
+### 7. Usage, memory and diagnostics
+
+```bash
+deepcode usage report                 # per-session token/cost report
+deepcode memory status                # memory layer status
+deepcode memory list --limit 20       # recent memory entries (--type fact|preference|experience|episode)
+deepcode memory search "user prefers" # FTS retrieval
+deepcode doctor                       # environment health check
+```
+
+### 8. Skills / Plugins / MCP management
+
+```bash
+deepcode skills list                  # installed SKILL.md packs
+deepcode plugins list                 # installed ESM plugins
+deepcode mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
+deepcode mcp list                     # configured MCP servers
+deepcode mcp remove <server>          # remove a server
+```
+
+### 9. Scripting a workflow (CI example)
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+for target in src/utils.ts src/api.ts; do
+  deepcode -p "Review $target for bugs, performance and edge cases" --permission-mode plan
+done
+```
+
+### 10. Programmatic API (TypeScript)
+
+DeepCode exposes its engine as a library (`dist/index.d.ts` ships with the package) for secondary development and plugin consumption:
+
+```ts
+import { loadConfig, DeepcodeEngine } from 'deepcode';
+
+const resolved = loadConfig({ provider: 'deepseek', model: 'deepseek-chat' });
+const engine = new DeepcodeEngine({ resolved });
+
+// Subscribe to engine events
+engine.onEvent((event) => {
+  switch (event.type) {
+    case 'text-delta':
+      process.stdout.write(event.text);
+      break;
+    case 'tool-start':
+      console.error(`\n⚙ ${event.name} ${JSON.stringify(event.input)}`);
+      break;
+    case 'usage':
+      console.error(`\n[usage] ${event.usage.inputTokens ?? 0} in / ${event.usage.outputTokens ?? 0} out`);
+      break;
+  }
+});
+
+await engine.init();
+const result = await engine.runTurn('Explain this project structure');
+console.error(`\n[stop] ${result.stopReason}`);
+await engine.finalizeMemory();
+engine.close();
+```
+
+Other public exports include `ToolRegistry`, `ToolExecutor`, `PermissionGate`, `runAgentTurn`, `UsageTracker`, `SessionStore`, `SkillLoader`, `PluginLoader` and the config utilities (`loadConfig`, `mergeConfig`, `pricingFor`, …) — see `src/index.ts`.
+
+## TUI Slash Commands
 
 | Command | Description |
 |---|---|
@@ -107,6 +300,8 @@ deepcode mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
 deepcode mcp list
 ```
 
+See [docs/EXTENSIONS.md](docs/EXTENSIONS.md) for the full plugin shape (`tools`, `skills`, `mcpServers`, `hooks`) and MCP configuration reference.
+
 ## Caching & Compaction (cost optimization)
 
 - **DeepSeek**: automatic prefix caching (`prompt_cache_hit_tokens` reported in real time). Fixed system prompt section order, determinized tool schema key order, strictly append-only session messages → maximizes hit rate
@@ -114,7 +309,7 @@ deepcode mcp list
 - **Auto compaction**: folds early turns automatically when usage exceeds `compactAt` (default 70%); compacted content is distilled into memory first (zero information loss)
 - Hit rate and estimated savings are visible in the status bar and the `/cost` dashboard
 
-## Directory structure
+## Directory Structure
 
 ```
 src/
@@ -136,8 +331,64 @@ src/
 
 ```bash
 pnpm test        # 88 tests: config/permissions/compaction/caching/usage/memory/worktree/MCP/loop/rendering
-pnpm typecheck
+pnpm test:watch  # watch mode
+pnpm typecheck   # tsc --noEmit (strict)
 ```
+
+## Contributing
+
+Contributions of all kinds are welcome — bug reports, feature ideas, docs, and code.
+
+### Development setup
+
+```bash
+git clone <your-repo-url> deepcode
+cd deepcode
+pnpm install
+pnpm dev          # run the CLI from source without building
+pnpm test         # run the test suite
+```
+
+### Commands
+
+| Command | Description |
+|---|---|
+| `pnpm dev` | Run the CLI from source via `tsx` (no build step) |
+| `pnpm build` | Bundle `src/` → `dist/` with tsup (ESM, Node 20 target) |
+| `pnpm start` | Run the built CLI (`node dist/cli.js`) |
+| `pnpm test` | Run all Vitest tests (`tests/**/*.test.{ts,tsx}`, 30 s timeout) |
+| `pnpm test:watch` | Vitest watch mode |
+| `pnpm typecheck` | `tsc --noEmit` with strict settings |
+| `pnpm doctor` | Run the CLI's `doctor` health check |
+
+### Code conventions
+
+- **TypeScript strict**: the project compiles with `strict`, `noUncheckedIndexedAccess` and `noImplicitOverride` enabled — your code must typecheck cleanly (`pnpm typecheck`).
+- **ESM only**: `"type": "module"` with `NodeNext` module resolution; use `import`/`export` with explicit `.js` extensions for relative paths (e.g. `import { loadConfig } from './config/loader.js'`).
+- **React for TUI components**: UI code under `src/ui/` uses React + Ink (`jsx: react-jsx`).
+- **Keep behavior covered**: new tools, permission paths, memory/compaction logic and provider adapters should ship with Vitest tests under `tests/`. Look at the existing fixtures (`tests/fixtures`) for helper patterns.
+
+### Pull request workflow
+
+1. **Fork & branch** — create a feature branch from `main` (e.g. `feat/xxx`, `fix/xxx`).
+2. **Implement** — follow the conventions above; keep changes focused and reviewable.
+3. **Test** — run `pnpm test` and `pnpm typecheck`; both must pass locally.
+4. **Document** — if behavior changes (config keys, CLI flags, tool schemas, provider behavior), update the relevant section of this README or `docs/*.md`.
+5. **Open the PR** — describe *what* changed, *why*, and how it was tested. Reference related issues.
+
+### Commit messages
+
+Use [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`, `perf:`. Examples:
+
+```
+feat(providers): add OpenAI-compatible endpoint support
+fix(memory): persist distilled facts before process exit
+docs: add installation and contribution guide
+```
+
+### Reporting issues
+
+When opening an issue, include: the environment (`node --version`, `deepcode --version`), the provider/model in use, the exact command that failed, and any relevant log output (run with `-v` for verbose output).
 
 ## Documentation
 
@@ -147,3 +398,7 @@ pnpm typecheck
 - [Skills / Plugins / MCP](docs/EXTENSIONS.md)
 - [Agent Memory](docs/MEMORY.md)
 - [Browser rendering review](docs/BROWSER_REVIEW.md)
+
+## License
+
+This project does not currently include a LICENSE file. Please contact the maintainers before reusing or redistributing the code.
