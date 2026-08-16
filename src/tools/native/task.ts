@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { ToolDef, ToolContext, ToolResult } from '../types.js';
 import { createWorktree, mergeWorktree, worktreeSummary, discardWorktree, type WorktreeHandle } from '../../git/worktree.js';
 
-export const taskSchema = z.object({
+const taskSchema = z.object({
   task: z.string().min(1),
   label: z.string().optional(),
   worktree: z.boolean().optional(),

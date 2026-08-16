@@ -6,7 +6,7 @@ export interface TodoItem {
   status: 'pending' | 'in_progress' | 'completed';
 }
 
-export const todoWriteSchema = z.object({
+const todoWriteSchema = z.object({
   todos: z.array(
     z.object({
       content: z.string().min(1),

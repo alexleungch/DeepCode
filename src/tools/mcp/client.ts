@@ -6,7 +6,7 @@ import type { Skill } from '../../skills/types.js';
  * MCP client management: stdio (command/args/env) and HTTP/SSE (url) servers.
  * Lazy connection: connects at startup; failure does not block the main loop (the tool is marked unavailable).
  */
-export interface McpToolBridge {
+interface McpToolBridge {
   /** MCP tool registered as a ToolDef. */
   toToolDef(serverName: string, tool: { name: string; description?: string; inputSchema?: unknown }): ToolDef;
 }

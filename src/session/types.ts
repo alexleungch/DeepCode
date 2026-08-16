@@ -18,7 +18,8 @@ export interface SessionRecord {
   compacted: CompactionPlan[];
 }
 
-type SessionLine =
+/** One JSONL line of the on-disk session format */
+export type SessionLine =
   | { t: 'meta'; id: string; createdAt: number; workspace: string; provider: ProviderId; model: string; title: string }
   | { t: 'message'; role: ChatMessage['role']; content: ChatMessage['content'] }
   | { t: 'usage'; event: UsageEvent }

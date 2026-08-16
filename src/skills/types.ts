@@ -9,8 +9,3 @@ export interface Skill {
   dir: string;
   sizeTokens: number;
 }
-
-export interface SkillScopeConfig {
-  enabled: boolean;
-  directories: string[];
-}

@@ -217,6 +217,9 @@ describe('integration: fake provider full loop', () => {
     const trMsg = engine.session.messages.find((m) => typeof m.content !== 'string' && m.content.some((b) => b.type === 'tool_result'));
     const tr = (trMsg!.content as { type: string; content: string; isError?: boolean }[]).find((b) => b.type === 'tool_result')!;
     expect(tr.content).toContain('denied');
+    // A user-denied tool must still emit tool-result (settle its card), otherwise the streamed
+    // "…" card never reaches a terminal state and the assistant message stays in the live region.
+    expect(events.some((e) => e.type === 'tool-result' && e.callId === 'd1')).toBe(true);
     engine.close();
   });
 

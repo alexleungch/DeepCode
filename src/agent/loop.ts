@@ -15,7 +15,7 @@ import type { SessionRecord } from '../session/types.js';
 import type { SessionStore } from '../session/store.js';
 import type { TodoStore } from '../tools/native/todo.js';
 
-export interface AgentLoopDeps {
+interface AgentLoopDeps {
   config: DeepcodeConfig;
   provider: LLMProvider;
   modelMeta: ModelMeta;
@@ -46,11 +46,18 @@ export interface TurnResult {
   stopReason: string;
 }
 
-const MAX_REQUEST_TOKENS = 8192;
+/**
+ * Fallback output cap when a model has no explicit maxOutputTokens. Must stay within the accepted
+ * range of every target API: OpenAI-compatible endpoints validate max_tokens against the model's
+ * output limit and reject oversized values with HTTP 400 (e.g. DeepSeek rejects anything > 393216).
+ * The previous default of 100M caused exactly that error on deepseek-v4-flash.
+ */
+const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
 
-/** Per-model output cap (config.modelMeta.<model>.maxOutputTokens), defaulting to MAX_REQUEST_TOKENS */
-function maxOutputTokens(modelMeta: ModelMeta): number {
-  return modelMeta.maxOutputTokens ?? MAX_REQUEST_TOKENS;
+/** Per-model output cap (config.modelMeta.<model>.maxOutputTokens); defaults to the model's context
+ *  window, clamped to DEFAULT_MAX_OUTPUT_TOKENS so the sent value is always within every API's range. */
+export function maxOutputTokens(modelMeta: ModelMeta): number {
+  return modelMeta.maxOutputTokens ?? Math.min(modelMeta.windowTokens || DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS);
 }
 
 export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Promise<TurnResult> {
@@ -61,6 +68,10 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
   sessionStore.appendMessage(session.id, messages[messages.length - 1]!);
 
   const windowTokens = deps.modelMeta.windowTokens || config.context.maxTokens;
+  // Live context-usage broadcast: recomputed from the in-scope `messages` array (accurate mid-turn,
+  // unlike engine.contextRatio() which only sees session.messages after the turn finishes). Consumed
+  // by the TUI reducer to keep the status-bar ctx bar and /context panel in sync as the conversation grows.
+  const emitContext = () => emit({ type: 'context', ratio: estimateMessagesTokens(messages) / windowTokens, window: windowTokens });
   const compactAtTokens = Math.floor(windowTokens * config.context.compactAt);
   let turns = 0;
   let interrupted = false;
@@ -89,6 +100,7 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
           messages.splice(0, messages.length, ...plan.messages);
           sessionStore.appendCompaction(session.id, plan);
           emit({ type: 'compacted', plan });
+          emitContext();
           // verify budget after compaction
           if (estimateMessagesTokens(messages) > compactAtTokens) {
             emit({ type: 'error', message: 'Context exceeds budget even after compaction; request aborted (use /clear or /compact)' });
@@ -138,6 +150,7 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
       // reject an assistant message with neither content nor tool_calls ("Invalid assistant message").
       if (toolUses.length === 0 && !hasVisibleContent(response.message)) {
         emit({ type: 'turn-end', turn: turns + 1, stopReason: finalStopReason });
+        emitContext();
         break;
       }
 
@@ -147,6 +160,7 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
 
       if (toolUses.length === 0) {
         emit({ type: 'turn-end', turn: turns + 1, stopReason: finalStopReason });
+        emitContext();
         break;
       }
 
@@ -155,15 +169,20 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
         for (const msg of observations) {
           messages.push(msg);
           sessionStore.appendMessage(session.id, msg);
-          emit({ type: 'message', message: msg, source: 'assistant' });
+          // Observations (tool_result blocks, optional vision images) are internal conversation
+          // turns for the model's next step — they are NOT displayed as separate chat lines. The
+          // tool card (tool-start/tool-result events) already surfaces the result; emitting them
+          // here with source:'assistant' + empty text would push a blank assistant message per batch.
         }
       } else {
         // all denied/aborted
         finalStopReason = 'tools-denied';
         emit({ type: 'turn-end', turn: turns + 1, stopReason: finalStopReason });
+        emitContext();
         break;
       }
       emit({ type: 'turn-end', turn: turns + 1, stopReason: finalStopReason });
+      emitContext();
     }
   } finally {
     signal.removeEventListener('abort', onAbort);
@@ -261,11 +280,17 @@ async function runToolCalls(
   // 2) gate decisions (hard deny / auto allow) + pending list
   const decisions = new Map<string, 'allow' | 'deny' | 'allow-always' | 'deny-always'>();
   const pending: ApprovalItem[] = [];
+  // CallIds already settled with a tool-result by the hard-deny guardrail, so the step-4
+  // settle below does not emit a duplicate card update.
+  const hardDenied = new Set<string>();
   for (const item of items) {
     const d = gate.check(item);
     if (d) {
       decisions.set(item.callId, d.action);
-      if (d.action === 'deny') emit({ type: 'tool-result', callId: item.callId, name: item.toolName, result: { content: 'Operation denied by permission rules', isError: true }, durationMs: 0 });
+      if (d.action === 'deny') {
+        hardDenied.add(item.callId);
+        emit({ type: 'tool-result', callId: item.callId, name: item.toolName, result: { content: 'Operation denied by permission rules', isError: true }, durationMs: 0 });
+      }
     } else {
       pending.push(item);
     }
@@ -277,10 +302,19 @@ async function runToolCalls(
     emit({ type: 'approval-request', requestId, items: pending });
     const result = await approvalHandler(pending);
     emit({ type: 'approval-result', requestId, decisions: result.decisions });
-    if (result.aborted) return null;
+    if (result.aborted) {
+      // Nothing runs after an abort: settle the pending cards so their messages can settle
+      // too (otherwise the streamed tool_use cards would stay "…" in the live region forever).
+      for (const item of pending) {
+        emit({ type: 'tool-result', callId: item.callId, name: item.toolName, result: { content: 'Approval aborted', isError: true }, durationMs: 0 });
+      }
+      return null;
+    }
     for (const d of result.decisions) {
       decisions.set(d.callId, d.action);
-      gate.remember(d);
+      // toolName lets gate.remember() record allow-always/deny-always even when the decision
+      // was produced outside a check() registration (e.g. tests or handlers that return it directly).
+      gate.remember({ ...d, toolName: d.toolName ?? items.find((i) => i.callId === d.callId)?.toolName });
     }
     for (const item of pending) {
       if (!decisions.has(item.callId)) decisions.set(item.callId, 'deny');
@@ -294,6 +328,13 @@ async function runToolCalls(
 
   for (const tu of denied) {
     results.set(tu.id, { content: 'User denied this operation', isError: true });
+    // User-denied tools never execute, so the executor never emits tool-result for them. Without
+    // this settle the streamed card stays "…" forever and the assistant message never reaches a
+    // terminal state (it would remain in the live region and break render ordering). Hard-denied
+    // tools were already settled in step 2 and are skipped here to avoid a duplicate emit.
+    if (!hardDenied.has(tu.id)) {
+      emit({ type: 'tool-result', callId: tu.id, name: tu.name, result: { content: 'User denied this operation', isError: true }, durationMs: 0 });
+    }
   }
 
   const maxParallel = Math.max(1, config.agent.maxParallelTools);
@@ -303,13 +344,14 @@ async function runToolCalls(
       batch.map(async (tu) => {
         const toolCtx: ToolContext = {
           ...ctxBase,
+          callId: tu.id,
           askApproval: async (innerItems) => {
             const r = await approvalHandler(innerItems);
             return r.decisions;
           },
           askApprovalBatch: approvalHandler,
         };
-        const result = await executor.execute(tu.name, tu.input, toolCtx);
+        const result = await executor.execute(tu.name, tu.input, toolCtx, tu.id);
         results.set(tu.id, result);
       }),
     );

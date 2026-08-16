@@ -14,7 +14,7 @@ export function estimateTokens(text: string): number {
   }
 }
 
-export function estimateMessageTokens(msg: ChatMessage): number {
+function estimateMessageTokens(msg: ChatMessage): number {
   const text = textContentOf(msg);
   let tokens = estimateTokens(text);
   if (typeof msg.content !== 'string') {

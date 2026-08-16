@@ -3,12 +3,12 @@ import type { ToolDef, ToolContext, ToolResult } from '../types.js';
 import type { Skill } from '../../skills/types.js';
 import { skillsCatalog } from '../../skills/loader.js';
 
-export const skillSchema = z.object({
+const skillSchema = z.object({
   action: z.enum(['list', 'load']),
   name: z.string().optional(),
 });
 
-export interface SkillToolOptions {
+interface SkillToolOptions {
   /** Skill loader (injected at engine assembly; includes plugin-embedded skills). */
   getSkills: () => Promise<Skill[]>;
   /** Skill catalog (appended to the system prompt). */

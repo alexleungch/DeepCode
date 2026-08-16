@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config/loader.js';
 import { defaultConfig, mergeConfig, modelMetaFor, pricingFor } from '../src/config/defaults.js';
+import { maxOutputTokens } from '../src/agent/loop.js';
+import type { ModelMeta } from '../src/config/types.js';
 
 let home: string;
 let workspace: string;
@@ -98,5 +100,47 @@ describe('mergeConfig / modelMetaFor / pricingFor', () => {
     const p = pricingFor(cfg, 'deepseek-chat');
     expect(p.input).toBe(0.5);
     expect(p.output).toBe(1.1); // untouched keeps the built-in value
+  });
+});
+
+describe('max_tokens safety (regression: DeepSeek 400 "valid range of max_tokens is [1, 393216]")', () => {
+  it('never sends an unbounded max_tokens for a model without explicit metadata', () => {
+    const meta: ModelMeta = {
+      id: 'deepseek-v4-flash',
+      windowTokens: 128_000,
+      supportsVision: false,
+      supportsTools: true,
+      cacheControl: 'auto',
+    };
+    expect(maxOutputTokens(meta)).toBeLessThanOrEqual(32_768);
+    expect(maxOutputTokens(meta)).toBeGreaterThan(0);
+  });
+
+  it('prefers the explicit per-model cap', () => {
+    const meta: ModelMeta = {
+      id: 'deepseek-v4-flash',
+      windowTokens: 1_000_000,
+      maxOutputTokens: 393_216,
+      supportsVision: false,
+      supportsTools: true,
+      supportsThinking: true,
+      cacheControl: 'auto',
+    };
+    expect(maxOutputTokens(meta)).toBe(393_216);
+  });
+
+  it('builtin deepseek-v4 metadata carries the documented window and output cap', () => {
+    const cfg = defaultConfig();
+    const flash = modelMetaFor(cfg, 'deepseek-v4-flash');
+    expect(flash.windowTokens).toBe(1_000_000);
+    expect(flash.maxOutputTokens).toBe(393_216);
+    const chat = modelMetaFor(cfg, 'deepseek-chat');
+    expect(chat.maxOutputTokens).toBe(8_192); // within the legacy alias' documented limit
+  });
+
+  it('pricingFor resolves deepseek-v4 prices', () => {
+    const cfg = defaultConfig();
+    expect(pricingFor(cfg, 'deepseek-v4-flash').input).toBe(0.14);
+    expect(pricingFor(cfg, 'deepseek-v4-flash').output).toBe(0.28);
   });
 });

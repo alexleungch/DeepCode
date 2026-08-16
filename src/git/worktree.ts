@@ -11,7 +11,7 @@ export interface WorktreeHandle {
   baseRef: string;
 }
 
-export interface WorktreeSummary {
+interface WorktreeSummary {
   branch: string;
   commits: number;
   filesChanged: string[];

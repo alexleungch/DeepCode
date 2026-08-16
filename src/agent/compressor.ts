@@ -18,7 +18,7 @@ export interface CompactionPlan {
   movedToMemory: MemoryExtraction[];
 }
 
-export interface CompressorOptions {
+interface CompressorOptions {
   /** Target occupancy after compaction (ratio 0-1) */
   targetRatio: number;
   /** Keep the most recent N turns (assistant+user pairs) */

@@ -1,4 +1,4 @@
-import type { ProviderId } from '../config/types.js';
+import type { PriceEntry, ProviderId } from '../config/types.js';
 import type { Usage } from '../providers/types.js';
 import { estimateCostUsd } from './pricing.js';
 
@@ -69,23 +69,15 @@ export class UsageTracker {
   private totals: UsageTotals = emptyTotals();
   private events: UsageEvent[] = [];
   private onEvent?: (e: UsageEvent) => void;
-  private pricing: (model: string) => PriceEntryLike;
+  private pricing: (model: string) => PriceEntry;
 
-  constructor(opts?: { onEvent?: (e: UsageEvent) => void; pricing?: (model: string) => PriceEntryLike }) {
+  constructor(opts?: { onEvent?: (e: UsageEvent) => void; pricing?: (model: string) => PriceEntry }) {
     this.onEvent = opts?.onEvent;
-    this.pricing =
-      opts?.pricing ??
-      (() => ({
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-      }));
+    this.pricing = opts?.pricing ?? (() => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }));
   }
 
-  /** Called by the Usage Extractor: normalizes and records usage returned by the provider (including immediate cost conversion) */
-  track(sessionId: string, provider: ProviderId, model: string, usage: Usage, opts?: { requestId?: string; latencyMs?: number; partial?: boolean }): UsageEvent {
-    const event: UsageEvent = {
+  private buildEvent(sessionId: string, provider: ProviderId, model: string, usage: Usage, opts?: { requestId?: string; latencyMs?: number; partial?: boolean }): UsageEvent {
+    return {
       ts: Date.now(),
       sessionId,
       provider,
@@ -102,6 +94,11 @@ export class UsageTracker {
       latencyMs: opts?.latencyMs ?? 0,
       partial: opts?.partial,
     };
+  }
+
+  /** Called by the Usage Extractor: normalizes and records usage returned by the provider (including immediate cost conversion) */
+  track(sessionId: string, provider: ProviderId, model: string, usage: Usage, opts?: { requestId?: string; latencyMs?: number; partial?: boolean }): UsageEvent {
+    const event = this.buildEvent(sessionId, provider, model, usage, opts);
     this.events.push(event);
     addToTotals(this.totals, event);
     this.onEvent?.(event);
@@ -115,33 +112,10 @@ export class UsageTracker {
 
   /** Builds an event without recording it (for real-time streaming to the UI; the final done track is authoritative) */
   peek(provider: ProviderId, model: string, usage: Usage, opts?: { requestId?: string; latencyMs?: number; partial?: boolean }): UsageEvent {
-    return {
-      ts: Date.now(),
-      sessionId: '',
-      provider,
-      model,
-      requestId: opts?.requestId,
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cacheReadTokens: usage.cacheReadTokens,
-      cacheWriteTokens: usage.cacheWriteTokens,
-      promptCacheHitTokens: usage.promptCacheHitTokens,
-      promptCacheMissTokens: usage.promptCacheMissTokens,
-      cachedContentTokenCount: usage.cachedContentTokenCount,
-      costUsd: estimateCostUsd(this.pricing(model), usage),
-      latencyMs: opts?.latencyMs ?? 0,
-      partial: opts?.partial,
-    };
+    return this.buildEvent('', provider, model, usage, opts);
   }
 
   totalsSnapshot(): UsageTotals {
     return { ...this.totals };
   }
 }
-
-type PriceEntryLike = {
-  input: number;
-  output: number;
-  cacheRead?: number;
-  cacheWrite?: number;
-};

@@ -6,7 +6,7 @@ import type { ToolDef, ToolContext, ToolResult } from '../types.js';
 const MAX_CHARS = 60_000;
 const MAX_LINES = 4000;
 
-export const readFileSchema = z.object({
+const readFileSchema = z.object({
   path: z.string().min(1),
   offset: z.number().int().nonnegative().optional(),
   limit: z.number().int().positive().max(MAX_LINES).optional(),

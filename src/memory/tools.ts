@@ -2,30 +2,30 @@ import { z } from 'zod';
 import type { ToolDef, ToolContext, ToolResult } from '../tools/types.js';
 import type { MemoryDb } from './db.js';
 import type { MemoryPipeline } from './pipeline.js';
-import type { MemoryType } from '../config/types.js';
+import { memoryTypes, type MemoryType } from '../config/types.js';
 
-export const memorySaveSchema = z.object({
-  type: z.enum(['fact', 'preference', 'experience', 'episode']),
+const memorySaveSchema = z.object({
+  type: z.enum(memoryTypes),
   content: z.string().min(5).max(20_000),
   scope: z.enum(['global', 'project']).optional(),
   importance: z.number().min(0).max(1).optional(),
 });
 
-export const memorySearchSchema = z.object({
+const memorySearchSchema = z.object({
   query: z.string().min(1),
   limit: z.number().int().min(1).max(20).optional(),
 });
 
-export const memoryListSchema = z.object({
-  type: z.enum(['fact', 'preference', 'experience', 'episode']).optional(),
+const memoryListSchema = z.object({
+  type: z.enum(memoryTypes).optional(),
   limit: z.number().int().min(1).max(100).optional(),
 });
 
-export const memoryForgetSchema = z.object({
+const memoryForgetSchema = z.object({
   id: z.number().int().positive(),
 });
 
-export interface MemoryToolOptions {
+interface MemoryToolOptions {
   db: MemoryDb;
   pipeline: MemoryPipeline;
   workspace: string;
@@ -40,7 +40,7 @@ export function makeMemoryTools(opts: MemoryToolOptions): ToolDef[] {
     inputSchema: {
       type: 'object',
       properties: {
-        type: { type: 'string', enum: ['fact', 'preference', 'experience', 'episode'] },
+        type: { type: 'string', enum: [...memoryTypes] },
         content: { type: 'string', description: 'Memory content (a concise, complete sentence)' },
         scope: { type: 'string', enum: ['global', 'project'], description: 'Scope (default project)' },
         importance: { type: 'number', minimum: 0, maximum: 1 },
@@ -94,7 +94,7 @@ export function makeMemoryTools(opts: MemoryToolOptions): ToolDef[] {
     inputSchema: {
       type: 'object',
       properties: {
-        type: { type: 'string', enum: ['fact', 'preference', 'experience', 'episode'] },
+        type: { type: 'string', enum: [...memoryTypes] },
         limit: { type: 'integer', minimum: 1, maximum: 100 },
       },
     },

@@ -1,10 +1,37 @@
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import type { Skill, SkillScopeConfig } from './types.js';
+import type { Skill } from './types.js';
 import type { SkillConfig } from '../config/types.js';
 
 const FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/;
+
+/**
+ * Lenient, line-based frontmatter parser used as a fallback when the strict
+ * YAML parser throws (e.g. a value containing "key: sub" that YAML
+ * misinterprets as a nested mapping — common in free-form skill descriptions).
+ * We only need `name` and `description`, so a best-effort per-line scan is
+ * sufficient and keeps the skill loadable instead of silently dropping it.
+ */
+function lenientFrontmatter(fm: string): Record<string, unknown> {
+  const out: Record<string, string> = {};
+  let curKey: string | null = null;
+  for (const line of fm.split('\n')) {
+    const m = /^\s*([A-Za-z0-9_-]+)\s*:\s?(.*)$/.exec(line);
+    if (m && m[1]) {
+      curKey = m[1];
+      out[curKey] = m[2] ?? '';
+    } else if (curKey) {
+      out[curKey] = (out[curKey] ?? '') + '\n' + line;
+    }
+  }
+  for (const k of Object.keys(out)) {
+    const v = out[k];
+    if (v !== undefined) out[k] = v.trim();
+  }
+  return out as unknown as Record<string, unknown>;
+}
+
 
 export function parseSkillFile(file: string): { name: string; description: string; body: string } | null {
   let raw: string;
@@ -15,11 +42,14 @@ export function parseSkillFile(file: string): { name: string; description: strin
   }
   const m = FRONTMATTER_RE.exec(raw);
   if (!m) return null;
-  let meta: Record<string, unknown> = {};
+  const fm = m[1] ?? '';
+  let meta: Record<string, unknown>;
   try {
-    meta = (parseYaml(m[1] ?? '') ?? {}) as Record<string, unknown>;
+    meta = (parseYaml(fm) ?? {}) as Record<string, unknown>;
   } catch {
-    return null;
+    // Strict YAML failed — fall back to the lenient parser so a skill whose
+    // frontmatter contains an embedded ": " is not silently dropped.
+    meta = lenientFrontmatter(fm);
   }
   const name = typeof meta.name === 'string' ? meta.name : '';
   const description = typeof meta.description === 'string' ? meta.description : '';
@@ -49,7 +79,11 @@ export class SkillLoader {
       const skillFile = join(skillDir, 'SKILL.md');
       if (!existsSync(skillFile)) continue;
       const parsed = parseSkillFile(skillFile);
-      if (!parsed) continue;
+      if (!parsed) {
+        // Surface the failure instead of silently skipping the skill.
+        console.warn(`[skills] skipped ${skillFile}: no valid 'name' found in frontmatter`);
+        continue;
+      }
       out.push({
         name: parsed.name,
         description: parsed.description,

@@ -8,7 +8,7 @@ import { makeGrepTool } from './grep.js';
 import { makeTodoTool, type TodoStore } from './todo.js';
 import { makeAskUserTool } from './ask-user.js';
 
-export interface NativeToolOptions {
+interface NativeToolOptions {
   workspace: string;
   todoStore: TodoStore;
   /** Optional extra tools (browser_review / skill / task / memory, etc. injected by later stages). */

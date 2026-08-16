@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import type { DeepcodeConfig } from '../config/types.js';
 import type { ToolSchema } from '../providers/types.js';
 
-export interface SystemPromptInput {
+interface SystemPromptInput {
   config: DeepcodeConfig;
   workspace: string;
   model: string;
@@ -35,6 +35,16 @@ Style: direct, concise, actionable. Understand the requirements first, then act 
 - Permission mode: ${config.permissions.mode}
 - Context window: ${config.context.maxTokens} tokens (auto-compacts above ${Math.round(config.context.compactAt * 100)}%)
 - OS: ${process.platform} (${process.arch})`);
+
+  // ②b plan mode: behavior contract (only shown while plan mode is active)
+  if (config.permissions.mode === 'plan') {
+    sections.push(`# Plan mode (active)
+You are currently in PLAN MODE:
+- Analyze the request, explore the codebase and gather information using READ-ONLY tools only
+- Do NOT edit/write files or run commands with side effects (they will be denied by the permission system)
+- Produce a concrete, step-by-step implementation plan and end your reply with a "## Plan" section
+- The user reviews the plan and switches to execution mode (AUTO) to let you act on it`);
+  }
 
   // ③ project docs (CLAUDE.md / AGENTS.md / DEEPCODE.md etc.)
   if (input.projectDocs && input.projectDocs.length > 0) {

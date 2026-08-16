@@ -22,6 +22,8 @@ export interface ApprovalDecision {
   action: 'allow' | 'deny' | 'allow-always' | 'deny-always';
   /** Additional user feedback (fed back to the model). */
   feedback?: string;
+  /** Tool name; lets remember() record session-level rules without a prior check() registration. */
+  toolName?: string;
 }
 
 export interface ApprovalResult {
@@ -188,7 +190,7 @@ export class PermissionGate {
 
   /** Record a session-level decision ("always allow/deny"). */
   remember(decision: ApprovalDecision): void {
-    const tool = this.toolByCallId.get(decision.callId);
+    const tool = decision.toolName ?? this.toolByCallId.get(decision.callId);
     if (!tool) return;
     if (decision.action === 'allow-always') this.alwaysAllow.add(tool);
     if (decision.action === 'deny-always') this.alwaysDeny.add(tool);

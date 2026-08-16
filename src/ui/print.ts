@@ -2,7 +2,7 @@ import type { EngineEvent } from '../events.js';
 import { formatTokens } from '../agent/token-budget.js';
 import type { UsageTracker } from '../usage/extractor.js';
 
-export interface PrintRendererOptions {
+interface PrintRendererOptions {
   usage: UsageTracker;
   verbose?: boolean;
 }

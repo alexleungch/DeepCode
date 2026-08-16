@@ -11,7 +11,7 @@ export interface BrowserSession {
   close(): Promise<void>;
 }
 
-export interface ReviewPageInput {
+interface ReviewPageInput {
   url: string;
   timeoutMs: number;
   waitUntil: 'load' | 'domcontentloaded' | 'networkidle';

@@ -4,9 +4,11 @@ import { theme } from '../theme.js';
 import type { ApprovalView } from '../state.js';
 import { clipLine } from '../markdown.js';
 
-export interface ApprovalCallbacks {
+interface ApprovalCallbacks {
   /** y/n/a/d or an option number */
   decide(itemCallId: string, action: 'allow' | 'deny' | 'allow-always' | 'deny-always', feedback?: string): void;
+  /** Decide every remaining item with the same action (A = allow all, D = deny all) */
+  decideAll(action: 'allow' | 'deny'): void;
   /** Attach feedback (e mode) */
   setFeedbackMode(on: boolean): void;
   /** Incremental feedback text */
@@ -16,12 +18,16 @@ export interface ApprovalCallbacks {
   /** Deny everything and abort */
   abortAll(): void;
   focusNext(delta: number): void;
+  /** Toggle full diff display for the focused item */
+  toggleDiff(): void;
 }
 
-function renderItem(approval: ApprovalView, callbacks: ApprovalCallbacks, width: number) {
+function renderItem(approval: ApprovalView, callbacks: ApprovalCallbacks, width: number, diffExpanded: boolean) {
   const item = approval.items[approval.focusIndex];
   if (!item) return null;
   const focused = !approval.feedbackMode;
+  const allDiff = item.diff ? item.diff.split('\n') : [];
+  const shownDiff = diffExpanded ? allDiff : allDiff.slice(0, 40);
   return (
     <Box flexDirection="column">
       <Text color={theme.warning} bold>
@@ -33,7 +39,7 @@ function renderItem(approval: ApprovalView, callbacks: ApprovalCallbacks, width:
       {item.command ? <Text color={theme.code}>{`$ ${clipLine(item.command, width)}`}</Text> : null}
       {item.diff ? (
         <Box flexDirection="column" marginLeft={1}>
-          {item.diff.split('\n').slice(0, 40).map((l, i) => (
+          {shownDiff.map((l, i) => (
             <Text
               key={i}
               color={l.startsWith('+') ? theme.diffAdd : l.startsWith('-') ? theme.diffDel : l.startsWith('@@') || l.startsWith('---') || l.startsWith('+++') ? theme.diffHunk : theme.muted}
@@ -41,11 +47,16 @@ function renderItem(approval: ApprovalView, callbacks: ApprovalCallbacks, width:
               {clipLine(l, width)}
             </Text>
           ))}
+          {!diffExpanded && allDiff.length > 40 ? (
+            <Text color={theme.muted}>
+              … ({allDiff.length - 40} more lines — Ctrl+E to expand)
+            </Text>
+          ) : null}
         </Box>
       ) : null}
       {item.risk === 'high' ? <Text color={theme.error}>High-risk operation, please confirm carefully</Text> : null}
       <Text color={theme.muted} dimColor={!focused}>
-        [y] allow [n] deny [a] always allow [d] always deny [e] add feedback [Tab] switch item
+        [y] allow [n] deny [a] always allow [d] always deny [e] feedback [A] allow all [D] deny all [Tab]/[←→] switch [x] abort
       </Text>
       {approval.feedbackMode ? (
         <Box>
@@ -58,7 +69,17 @@ function renderItem(approval: ApprovalView, callbacks: ApprovalCallbacks, width:
 }
 
 /** Batch approval dialog (the core interaction of Ask mode) */
-export function ApprovalDialog({ approval, width, callbacks }: { approval: ApprovalView; width: number; callbacks: ApprovalCallbacks }) {
+export function ApprovalDialog({
+  approval,
+  width,
+  callbacks,
+  diffExpanded,
+}: {
+  approval: ApprovalView;
+  width: number;
+  callbacks: ApprovalCallbacks;
+  diffExpanded: boolean;
+}) {
   useInput((input, key) => {
     if (approval.feedbackMode) {
       if (key.return) callbacks.submitFeedback();
@@ -71,12 +92,26 @@ export function ApprovalDialog({ approval, width, callbacks }: { approval: Appro
       callbacks.focusNext(1);
       return;
     }
+    if (key.leftArrow) {
+      callbacks.focusNext(-1);
+      return;
+    }
+    if (key.rightArrow) {
+      callbacks.focusNext(1);
+      return;
+    }
+    if (key.ctrl && (input === 'e' || input === 'E')) {
+      callbacks.toggleDiff();
+      return;
+    }
     const item = approval.items[approval.focusIndex];
     if (!item) return;
     if (input === 'y') callbacks.decide(item.callId, 'allow');
     else if (input === 'n') callbacks.decide(item.callId, 'deny');
     else if (input === 'a') callbacks.decide(item.callId, 'allow-always');
     else if (input === 'd') callbacks.decide(item.callId, 'deny-always');
+    else if (input === 'A') callbacks.decideAll('allow');
+    else if (input === 'D') callbacks.decideAll('deny');
     else if (input === 'e') callbacks.setFeedbackMode(true);
     else if (input === 'x') callbacks.abortAll();
     else if (/^[1-9]$/.test(input)) {
@@ -89,7 +124,7 @@ export function ApprovalDialog({ approval, width, callbacks }: { approval: Appro
 
   return (
     <Box borderStyle="bold" borderColor={theme.warning} paddingX={1} flexDirection="column" flexShrink={0}>
-      {renderItem(approval, callbacks, width)}
+      {renderItem(approval, callbacks, width, diffExpanded)}
     </Box>
   );
 }

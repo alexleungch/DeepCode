@@ -15,7 +15,7 @@ export const permissionModes = ['ask', 'acceptEdits', 'plan', 'bypassPermissions
 export type PermissionMode = (typeof permissionModes)[number];
 
 export const worktreeModes = ['auto', 'on', 'off'] as const;
-export type WorktreeMode = (typeof worktreeModes)[number];
+type WorktreeMode = (typeof worktreeModes)[number];
 
 export const memoryTypes = ['fact', 'preference', 'experience', 'episode'] as const;
 export type MemoryType = (typeof memoryTypes)[number];
@@ -35,7 +35,11 @@ export interface ModelMeta {
    * json=JSON protocol emulation (e.g. deepseek-reasoner lacks native tool_use; parsed via an output contract)
    */
   toolCallProtocol?: 'native' | 'json';
-  /** Max output tokens per request (defaults to 8192). Raise for models whose reasoning can exhaust the cap before producing content. */
+  /**
+   * Max output tokens per request (defaults to the model's context window, clamped to 32768, in
+   * agent/loop.ts — never an unbounded value: APIs reject max_tokens above the model's output
+   * limit, e.g. DeepSeek returns HTTP 400 for anything > 393216).
+   */
   maxOutputTokens?: number;
 }
 
@@ -70,6 +74,23 @@ export interface PluginConfig {
   enabled: boolean;
   /** Extra plugin directories */
   directories: string[];
+}
+
+export interface TelegramConfig {
+  /** Bot token (plain string or env:VAR). Default: read TELEGRAM_BOT_TOKEN */
+  botToken?: string;
+  /** Allowlist of chat IDs. Empty = deny all (must be explicitly configured). */
+  allowChatIds?: number[];
+  /** getUpdates long-poll timeout (seconds), default 25 */
+  longPollTimeoutSec?: number;
+  /** editMessageText throttle interval (ms), default 1500 */
+  editIntervalMs?: number;
+  /** Editable bubble length cap while streaming, default 3500 */
+  maxBubbleChars?: number;
+  /** Permission mode for the bot session, default 'acceptEdits' */
+  permissionMode?: PermissionMode;
+  /** Engine workspace override, default = cwd */
+  workspace?: string;
 }
 
 export interface AgentConfig {
@@ -147,6 +168,7 @@ export interface DeepcodeConfig {
   mcpServers: Record<string, McpServerConfig>;
   skills: SkillConfig;
   plugins: PluginConfig;
+  telegram?: TelegramConfig;
 }
 
 export const providerEndpointSchema = z.object({
@@ -224,5 +246,16 @@ export const deepcodeConfigSchema = z
       enabled: z.boolean(),
       directories: z.array(z.string()),
     }),
+    telegram: z
+      .object({
+        botToken: z.string().optional(),
+        allowChatIds: z.array(z.number().int().nonnegative()).optional(),
+        longPollTimeoutSec: z.number().int().min(1).max(50).optional(),
+        editIntervalMs: z.number().int().min(200).max(10000).optional(),
+        maxBubbleChars: z.number().int().min(500).max(4000).optional(),
+        permissionMode: z.enum(permissionModes).optional(),
+        workspace: z.string().optional(),
+      })
+      .optional(),
   })
   .partial();

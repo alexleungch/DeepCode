@@ -20,7 +20,7 @@ export interface SubagentResult {
   error?: string;
 }
 
-export interface SubagentDeps {
+interface SubagentDeps {
   config: DeepcodeConfig;
   provider: LLMProvider;
   registry: ToolRegistry;

@@ -6,7 +6,7 @@ import ignore from 'ignore';
 import type { ToolDef, ToolContext, ToolResult } from '../types.js';
 import { globToRegExp, loadIgnoreRules } from './glob.js';
 
-export const grepSchema = z.object({
+const grepSchema = z.object({
   pattern: z.string().min(1),
   path: z.string().optional(),
   include: z.string().optional(),

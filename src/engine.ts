@@ -302,6 +302,22 @@ export class DeepcodeEngine {
     this.abortController = new AbortController();
   }
 
+  /** Switch the permission mode (plan / ask / acceptEdits / bypassPermissions).
+   *  Session-scoped: the mode is not persisted, so a restart returns to the configured default.
+   *  The system prompt is rebuilt so the model knows its constraints (e.g. plan mode = read-only). */
+  setMode(mode: PermissionMode): void {
+    this.config.permissions.mode = mode;
+    (this as { systemPrompt: string }).systemPrompt = buildSystemPrompt({
+      config: this.config,
+      workspace: this.workspace,
+      model: this.provider.model,
+      providerLabel: providerLabel(this.config.provider),
+      tools: this.registry.schemas(),
+      projectDocs: [],
+      userPromptFile: this.opts.resolved.paths.systemPromptFile,
+    });
+  }
+
   /** Switch the model (rebuilds the provider and the system prompt) */
   setModel(model: string): void {
     this.provider = createProvider(this.config, this.config.provider, model);
@@ -462,6 +478,8 @@ export class DeepcodeEngine {
       this.session.messages = plan.messages;
       this.sessionStore.appendCompaction(this.session.id, plan);
       this.emit({ type: 'compacted', plan });
+      const window = this.provider.modelMeta.windowTokens || this.config.context.maxTokens;
+      this.emit({ type: 'context', ratio: this.contextRatio(), window });
     }
     return plan.removedTurns > 0 ? plan : null;
   }

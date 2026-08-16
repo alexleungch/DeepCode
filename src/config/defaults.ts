@@ -6,6 +6,7 @@ export const BUILTIN_MODEL_META: Record<string, ModelMeta> = {
   'deepseek-chat': {
     id: 'deepseek-chat',
     windowTokens: 128_000,
+    maxOutputTokens: 8_192, // documented max_tokens limit
     supportsVision: false,
     supportsTools: true,
     supportsThinking: false,
@@ -14,16 +15,36 @@ export const BUILTIN_MODEL_META: Record<string, ModelMeta> = {
   'deepseek-reasoner': {
     id: 'deepseek-reasoner',
     windowTokens: 128_000,
+    maxOutputTokens: 8_192, // documented max_tokens limit
     supportsVision: false,
     supportsTools: true, // reasoner has no native function calling → simulated via the JSON tool calling protocol (toolCallProtocol: 'json')
     supportsThinking: true,
     cacheControl: 'auto',
     toolCallProtocol: 'json',
   },
+  'deepseek-v4-flash': {
+    id: 'deepseek-v4-flash',
+    windowTokens: 1_000_000,
+    maxOutputTokens: 393_216, // 384K output maximum (DeepSeek rejects any max_tokens > this with HTTP 400)
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: true,
+    cacheControl: 'auto',
+  },
+  'deepseek-v4-pro': {
+    id: 'deepseek-v4-pro',
+    windowTokens: 1_000_000,
+    maxOutputTokens: 393_216, // 384K output maximum
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: true,
+    cacheControl: 'auto',
+  },
   // Anthropic (explicit cache_control breakpoints; vision)
   'claude-sonnet-4-5': {
     id: 'claude-sonnet-4-5',
     windowTokens: 200_000,
+    maxOutputTokens: 64_000, // Anthropic per-request max_tokens limit
     supportsVision: true,
     supportsTools: true,
     supportsThinking: true,
@@ -32,6 +53,7 @@ export const BUILTIN_MODEL_META: Record<string, ModelMeta> = {
   'claude-opus-4-1': {
     id: 'claude-opus-4-1',
     windowTokens: 200_000,
+    maxOutputTokens: 64_000, // Anthropic per-request max_tokens limit
     supportsVision: true,
     supportsTools: true,
     supportsThinking: true,
@@ -40,6 +62,7 @@ export const BUILTIN_MODEL_META: Record<string, ModelMeta> = {
   'claude-3-5-haiku': {
     id: 'claude-3-5-haiku',
     windowTokens: 200_000,
+    maxOutputTokens: 8_192, // Anthropic per-request max_tokens limit for haiku
     supportsVision: true,
     supportsTools: true,
     supportsThinking: false,
@@ -49,6 +72,7 @@ export const BUILTIN_MODEL_META: Record<string, ModelMeta> = {
   'gemini-2.5-pro': {
     id: 'gemini-2.5-pro',
     windowTokens: 1_000_000,
+    maxOutputTokens: 65_536, // Gemini output token cap
     supportsVision: true,
     supportsTools: true,
     supportsThinking: true,
@@ -57,6 +81,7 @@ export const BUILTIN_MODEL_META: Record<string, ModelMeta> = {
   'gemini-2.5-flash': {
     id: 'gemini-2.5-flash',
     windowTokens: 1_000_000,
+    maxOutputTokens: 65_536, // Gemini output token cap
     supportsVision: true,
     supportsTools: true,
     supportsThinking: true,
@@ -131,6 +156,8 @@ export const DEFAULT_MODELS: Record<ProviderId, string> = {
 export const BUILTIN_PRICING: Record<string, PriceEntry> = {
   'deepseek-chat': { input: 0.27, output: 1.1, cacheRead: 0.07 },
   'deepseek-reasoner': { input: 0.55, output: 2.19, cacheRead: 0.14 },
+  'deepseek-v4-flash': { input: 0.14, output: 0.28, cacheRead: 0.028 },
+  'deepseek-v4-pro': { input: 1.74, output: 3.48, cacheRead: 0.145 },
   'claude-sonnet-4-5': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
   'claude-opus-4-1': { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
   'claude-3-5-haiku': { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
@@ -187,6 +214,13 @@ export function defaultConfig(): DeepcodeConfig {
     mcpServers: {},
     skills: { enabled: true, directories: [] },
     plugins: { enabled: true, directories: [] },
+    telegram: {
+      allowChatIds: [],
+      longPollTimeoutSec: 25,
+      editIntervalMs: 1500,
+      maxBubbleChars: 3500,
+      permissionMode: 'acceptEdits',
+    },
   };
 }
 
@@ -207,6 +241,7 @@ export function mergeConfig(base: DeepcodeConfig, patch: Partial<DeepcodeConfig>
     mcpServers: { ...base.mcpServers, ...patch.mcpServers },
     skills: { ...base.skills, ...patch.skills },
     plugins: { ...base.plugins, ...patch.plugins },
+    telegram: { ...base.telegram, ...patch.telegram },
   };
 }
 

@@ -9,7 +9,7 @@ import {
   type ReviewCapture,
 } from './controller.js';
 
-export const browserReviewSchema = z.object({
+const browserReviewSchema = z.object({
   url: z.string().min(1),
   timeoutMs: z.number().int().positive().max(120_000).optional(),
   waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle']).optional(),
@@ -23,7 +23,7 @@ export const browserReviewSchema = z.object({
   screenshot: z.boolean().optional(),
 });
 
-export interface BrowserReviewToolOptions {
+interface BrowserReviewToolOptions {
   workspace: string;
   screenshotsDir: string;
   /** Test injection; by default auto-detects playwright + the system browser. */

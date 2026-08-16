@@ -3,7 +3,7 @@ import { mkdirSync, appendFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MemoryType } from '../config/types.js';
 
-export interface MemoryEntry {
+interface MemoryEntry {
   id: number;
   scope: 'global' | 'project';
   type: MemoryType;
@@ -17,7 +17,7 @@ export interface MemoryEntry {
   score?: number;
 }
 
-export interface SaveMemoryInput {
+interface SaveMemoryInput {
   scope?: 'global' | 'project';
   type: MemoryType;
   content: string;

@@ -21,14 +21,3 @@ export interface Plugin {
     onToolResult?: (result: import('../tools/types.js').ToolResult, ctx: { toolName: string }) => import('../tools/types.js').ToolResult;
   };
 }
-
-export interface PluginScopeConfig {
-  enabled: boolean;
-  directories: string[];
-}
-
-/** Skill source resolved from a plugin directory */
-export interface PluginSkillSource {
-  pluginId: string;
-  dir: string;
-}

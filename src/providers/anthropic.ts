@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { DeepcodeConfig, ProviderId } from '../config/types.js';
+import { BUILTIN_MODEL_META } from '../config/defaults.js';
 import type {
   ChatMessage,
   ContentBlockImage,
@@ -97,6 +98,9 @@ export class AnthropicProvider implements LLMProvider {
 
   constructor(config: DeepcodeConfig, model: string) {
     this.model = model;
+    // Honor the per-model output cap (builtin table + user overrides); Anthropic validates
+    // max_tokens against the model's limit and rejects oversized values.
+    const maxOutputTokens = config.modelMeta[model]?.maxOutputTokens ?? BUILTIN_MODEL_META[model]?.maxOutputTokens;
     this.modelMeta = {
       id: model,
       windowTokens: 200_000,
@@ -104,6 +108,7 @@ export class AnthropicProvider implements LLMProvider {
       supportsTools: true,
       supportsThinking: true,
       cacheControl: 'explicit',
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     };
     const ep = config.providers.anthropic;
     const apiKey = ep?.apiKey ?? process.env.ANTHROPIC_API_KEY;
@@ -233,7 +238,7 @@ function mapStopReason(reason: Anthropic.Message['stop_reason']): LLMResponse['s
 }
 
 /** Incrementally merge tool_use input JSON (streaming partial_json) */
-export function mergePartialJson(current: Record<string, unknown>, partial: string): Record<string, unknown> {
+function mergePartialJson(current: Record<string, unknown>, partial: string): Record<string, unknown> {
   if (!partial) return current;
   const keys = Object.keys(current);
   if (keys.length === 0) {

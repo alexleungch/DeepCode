@@ -2,7 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-export interface RepoInfo {
+interface RepoInfo {
   isGit: boolean;
   branch: string | null;
   /** Project memory document content (CLAUDE.md/AGENTS.md/DEEPCODE.md, by priority) */

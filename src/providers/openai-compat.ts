@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import type { DeepcodeConfig, ProviderId } from '../config/types.js';
+import { BUILTIN_MODEL_META } from '../config/defaults.js';
 import type {
   ChatMessage,
   ContentBlockImage,
@@ -15,7 +16,7 @@ import type {
 } from './types.js';
 import { toOpenAiTools, stableSort } from './tool-schema.js';
 
-export interface OpenAiCompatOptions {
+interface OpenAiCompatOptions {
   id: ProviderId;
   label: string;
   /** Default endpoint */
@@ -260,14 +261,20 @@ export class OpenAiCompatProvider implements LLMProvider {
       throw new Error(`No ${opts.label} API key configured: set ${opts.envKey} or fill in providers.${opts.id}.apiKey in ~/.deepcode/config.json`);
     }
     this.client = new OpenAI({ apiKey, baseURL: baseUrl });
+    // Resolve model metadata from the builtin table + user overrides (config.modelMeta.<model>).
+    // maxOutputTokens matters here: without it the agent loop falls back to its own cap, and the
+    // request would carry an unbounded max_tokens that the API rejects (HTTP 400).
     const meta = config.modelMeta[model] ?? {};
+    const builtin = BUILTIN_MODEL_META[model];
+    const maxOutputTokens = meta.maxOutputTokens ?? builtin?.maxOutputTokens;
     this.modelMeta = {
       id: model,
-      windowTokens: 128_000,
-      supportsVision: false,
-      supportsTools: true,
-      supportsThinking: !!meta.supportsThinking || model.toLowerCase().includes('reasoner'),
-      cacheControl: 'auto',
+      windowTokens: meta.windowTokens ?? builtin?.windowTokens ?? 128_000,
+      supportsVision: meta.supportsVision ?? builtin?.supportsVision ?? false,
+      supportsTools: meta.supportsTools ?? builtin?.supportsTools ?? true,
+      supportsThinking: meta.supportsThinking ?? builtin?.supportsThinking ?? model.toLowerCase().includes('reasoner'),
+      cacheControl: meta.cacheControl ?? builtin?.cacheControl ?? 'auto',
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       toolCallProtocol: this.jsonMode ? 'json' : undefined,
     };
   }
@@ -282,7 +289,9 @@ export class OpenAiCompatProvider implements LLMProvider {
           ...(jsonMode ? toJsonModeMessages(req) : toOpenAiMessages(req)),
         ],
         tools: jsonMode || req.tools.length === 0 ? undefined : toOpenAiTools(req.tools),
-        max_tokens: req.maxTokens,
+        // Never send a max_tokens larger than the context window: APIs validate the value and
+        // reject anything above the model's output limit (DeepSeek: > 393216 → HTTP 400).
+        max_tokens: Math.min(req.maxTokens, this.modelMeta.windowTokens),
         temperature: req.temperature,
         stream: false,
       },
@@ -332,7 +341,8 @@ export class OpenAiCompatProvider implements LLMProvider {
           ...(jsonMode ? toJsonModeMessages(req) : toOpenAiMessages(req)),
         ],
         tools: jsonMode || req.tools.length === 0 ? undefined : toOpenAiTools(req.tools),
-        max_tokens: req.maxTokens,
+        // Clamp to the context window; see complete() for why (API rejects oversized max_tokens).
+        max_tokens: Math.min(req.maxTokens, this.modelMeta.windowTokens),
         temperature: req.temperature,
         stream: true,
         stream_options: { include_usage: true },

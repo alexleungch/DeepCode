@@ -1,4 +1,4 @@
-# deepcode
+# DeepCode
 
 Claude Code-style TypeScript terminal coding agent CLI. ReAct agent loop + multi-provider + MCP + Skills + Plugins + Agent Memory + Prompt Caching + auto context compaction + browser rendering review.
 

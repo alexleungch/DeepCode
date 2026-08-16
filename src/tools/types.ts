@@ -9,7 +9,7 @@ import type { UsageTracker } from '../usage/extractor.js';
 import type { SubagentResult } from '../agent/subagent.js';
 
 /** Tool artifact (file path, etc.). */
-export interface ToolArtifact {
+interface ToolArtifact {
   path: string;
 }
 
@@ -37,6 +37,8 @@ export interface ToolContext {
   cwd: string;
   workspace: string;
   sessionId: string;
+  /** The model tool_use id of the executing call ('' when the executor had no id, e.g. direct tests). */
+  callId?: string;
   config: DeepcodeConfig;
   permissionMode: PermissionMode;
   /** Request approval (Ask mode); batch approval returns per-item decisions. */

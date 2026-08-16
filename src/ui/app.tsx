@@ -9,7 +9,7 @@ import { PromptInput } from './components/PromptInput.js';
 import type { DeepcodeEngine } from '../engine.js';
 import { providerLabel } from '../engine.js';
 import { API_KEY_ENV } from '../config/loader.js';
-import { providerIds, type ProviderId } from '../config/types.js';
+import { providerIds, permissionModes, type PermissionMode, type ProviderId } from '../config/types.js';
 import type { ApprovalResult } from '../tools/permission.js';
 import { formatTokens } from '../agent/token-budget.js';
 
@@ -21,10 +21,13 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
     s.provider = engine.config.provider;
     s.model = engine.provider.model;
     s.workspace = engine.workspace;
+    s.permissionMode = engine.config.permissions.mode;
     return setContextInfo(s, engine.contextRatio(), engine.provider.modelMeta.windowTokens || engine.config.context.maxTokens);
   });
   const [showCost, setShowCost] = useState(false);
   const [showContext, setShowContext] = useState(false);
+  // Tool card whose full diff/result is expanded (set by Enter on a tool card)
+  const [expandedTool, setExpandedTool] = useState<string | null>(null);
   // Provider whose model name the user is being prompted to enter (set by /models <provider>)
   const [pendingModel, setPendingModel] = useState<ProviderId | null>(null);
   // Provider + model whose API key the user is being prompted to enter (after the model name)
@@ -63,6 +66,10 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   const [feedbackMode, setFeedbackMode] = useState(false);
   const [feedbackText, setFeedbackText] = useState('');
   const [focusIndex, setFocusIndex] = useState(0);
+  // Cumulative decisions in the current approval batch (for the summary line)
+  const [decisionSummary, setDecisionSummary] = useState<{ allowed: number; denied: number }>({ allowed: 0, denied: 0 });
+  // Whether the focused approval item's diff is fully expanded (Ctrl+E)
+  const [diffExpanded, setDiffExpanded] = useState(false);
 
   useEffect(() => {
     const off = engine.onEvent((e) => {
@@ -79,6 +86,8 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
         setFocusIndex(0);
         setFeedbackMode(false);
         setFeedbackText('');
+        setDecisionSummary({ allowed: 0, denied: 0 });
+        setDiffExpanded(false);
         setApprovalResolve(() => resolve);
       });
     };
@@ -90,8 +99,10 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
 
   const decide = (callId: string, action: 'allow' | 'deny' | 'allow-always' | 'deny-always', feedback?: string) => {
     if (!activeApproval || !approvalResolve) return;
-    const item = activeApproval.items.find((i) => i.callId === callId);
     const others = activeApproval.items.filter((i) => i.callId !== callId);
+    setDecisionSummary((s) =>
+      action === 'deny' || action === 'deny-always' ? { ...s, denied: s.denied + 1 } : { ...s, allowed: s.allowed + 1 },
+    );
     if (others.length === 0) {
       approvalResolve({ decisions: [{ callId, action, feedback }], aborted: false });
       setApproval(null);
@@ -101,10 +112,26 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
     // More items pending: decide the current one and keep the dialog for the rest
     setApproval({ requestId: activeApproval.requestId, items: others });
     setFocusIndex(0);
+    setDiffExpanded(false);
     const r = approvalResolve;
     setApprovalResolve(() => (result: ApprovalResult) => {
       r({ decisions: [{ callId, action, feedback }, ...result.decisions], aborted: result.aborted });
     });
+  };
+
+  /** Decide every remaining item with the same action (A = allow all, D = deny all). */
+  const decideAll = (action: 'allow' | 'deny') => {
+    if (!activeApproval || !approvalResolve) return;
+    const items = activeApproval.items;
+    setDecisionSummary((s) =>
+      action === 'deny' ? { ...s, denied: s.denied + items.length } : { ...s, allowed: s.allowed + items.length },
+    );
+    approvalResolve({
+      decisions: items.map((i) => ({ callId: i.callId, action })),
+      aborted: false,
+    });
+    setApproval(null);
+    setApprovalResolve(null);
   };
 
   const abortAll = () => {
@@ -114,6 +141,29 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   };
 
   useInput((input, key) => {
+    // Ctrl+C: while busy/interrupting → abort the current request; while idle → graceful exit
+    // (unmount → engine.finalizeMemory + close so memory/session/usage are flushed, not lost).
+    if (key.ctrl && (input === 'c' || input === 'C')) {
+      if (state.busy || approval !== null) {
+        engine.interrupt();
+      } else {
+        onExit();
+      }
+      return;
+    }
+    // Ctrl+O toggles the most recent tool card's full diff/result (only in the live region).
+    // Deliberately NOT Enter — Ink fires every useInput handler, so Enter would both submit the
+    // prompt input and toggle expansion; Ctrl+O is unambiguous and safe while typing.
+    if (key.ctrl && (input === 'o' || input === 'O')) {
+      const lastTool = [...state.messages]
+        .reverse()
+        .flatMap((m) => m.toolCalls)
+        .find((tc) => tc.status === 'done' || tc.status === 'error' || tc.status === 'denied');
+      if (lastTool) {
+        setExpandedTool((cur) => (cur === lastTool.callId ? null : lastTool.callId));
+      }
+      return;
+    }
     // History scrolling is delegated to the host terminal: completed messages live in <Static>
     // and enter the terminal scrollback, so the user reviews history with the terminal's native
     // scrollbar / PageUp / Home. No in-app scroll handling is needed here.
@@ -143,6 +193,12 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   });
 
   const onSubmit = (text: string) => {
+    // Help is transient: any new submission supersedes it so it never crowds the live region.
+    setState((s) =>
+      s.notices.some((n) => n.group === 'help')
+        ? { ...s, notices: s.notices.filter((n) => n.group !== 'help') }
+        : s,
+    );
     // Stage 1: a model name is being requested — the next submitted line is the model name
     if (pendingModel) {
       const pid = pendingModel;
@@ -218,7 +274,7 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
       <Box flexDirection="column" paddingX={1}>
         {live.map((m) => (
           <Box key={m.id} flexDirection="column">
-            <MessageItem m={m} width={contentWidth} />
+            <MessageItem m={m} width={contentWidth} expandedCallId={expandedTool ?? undefined} />
           </Box>
         ))}
         {state.notices.slice(-5).map((n) => (
@@ -241,6 +297,7 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
             width={width}
             callbacks={{
               decide: (callId, action, feedback) => decide(callId, action, feedback),
+              decideAll: (action) => decideAll(action),
               setFeedbackMode: (on) => setFeedbackMode(on),
               typeFeedback: (ch) => setFeedbackText((t) => t + ch),
               backspaceFeedback: () => setFeedbackText((t) => t.slice(0, -1)),
@@ -251,14 +308,25 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
                 setFeedbackText('');
               },
               abortAll,
-              focusNext: (d) => setFocusIndex((i) => (i + d) % Math.max(1, activeApproval.items.length)),
+              focusNext: (d) => {
+                setFocusIndex((i) => (i + d) % Math.max(1, activeApproval.items.length));
+                setDiffExpanded(false);
+              },
+              toggleDiff: () => setDiffExpanded((v) => !v),
             }}
+            diffExpanded={diffExpanded}
           />
+        ) : null}
+        {activeApproval && (decisionSummary.allowed > 0 || decisionSummary.denied > 0) ? (
+          <Text color={theme.muted}>
+            Decided so far: {decisionSummary.allowed} allowed · {decisionSummary.denied} denied
+          </Text>
         ) : null}
         {showCost ? <CostPanel state={state} width={width} onClose={() => setShowCost(false)} /> : null}
         {showContext ? <ContextPanel state={state} onClose={() => setShowContext(false)} /> : null}
         <PromptInput
           disabled={busy}
+          width={width}
           onSubmit={onSubmit}
           placeholder={
             pendingModel
@@ -281,6 +349,23 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
 function isSettled(m: import('./state.js').MessageView): boolean {
   if (m.streaming) return false;
   return m.toolCalls.every((tc) => tc.status === 'done' || tc.status === 'error' || tc.status === 'denied');
+}
+
+/** Status-bar style labels for permission modes (AUTO = the default ask mode). */
+const MODE_LABEL: Record<PermissionMode, string> = {
+  ask: 'AUTO',
+  acceptEdits: 'EDIT',
+  plan: 'PLAN',
+  bypassPermissions: 'BYPASS',
+};
+
+/** Mode that was active before entering plan mode, restored by /plan again (singleton TUI). */
+let prevNonPlanMode: PermissionMode = 'ask';
+
+/** Apply a permission-mode switch: engine + TUI state stay in sync. */
+function switchMode(engine: DeepcodeEngine, mode: PermissionMode, setState: React.Dispatch<React.SetStateAction<TUIState>>): void {
+  engine.setMode(mode);
+  setState((s) => ({ ...s, permissionMode: mode }));
 }
 
 function pushNotice(
@@ -349,6 +434,36 @@ function handleSlash(
     case 'compact':
       void engine.compactNow();
       break;
+    case 'plan': {
+      // Toggle plan mode: on = read-only planning, off = restore the previous mode
+      const cur = engine.config.permissions.mode;
+      if (cur === 'plan') {
+        switchMode(engine, prevNonPlanMode, setState);
+        pushNotice(setState, `Plan mode off — back to ${MODE_LABEL[prevNonPlanMode]} (/${prevNonPlanMode}) mode. Write/exec tools are allowed again (subject to permission rules).`, 'info', 'mode');
+      } else {
+        prevNonPlanMode = cur;
+        switchMode(engine, 'plan', setState);
+        pushNotice(setState, 'Plan mode on — the agent only reads and proposes a plan; write/exec tools are denied. Run /plan again (or /mode) to exit.', 'info', 'mode');
+      }
+      break;
+    }
+    case 'mode': {
+      const target = rest[0]?.toLowerCase();
+      if (!target) {
+        const cur = engine.config.permissions.mode;
+        pushNotice(setState, `Current mode: ${MODE_LABEL[cur]} (/${cur}). Usage: /mode <${permissionModes.join('|')}>`, 'info', 'mode');
+        break;
+      }
+      const m = permissionModes.find((p) => p === target);
+      if (!m) {
+        pushNotice(setState, `Unknown mode "${target}". Valid modes: ${permissionModes.join(', ')}`, 'error', 'mode');
+        break;
+      }
+      if (m !== 'plan') prevNonPlanMode = m;
+      switchMode(engine, m, setState);
+      pushNotice(setState, `Permission mode: ${MODE_LABEL[m]} (/${m}).`, 'info', 'mode');
+      break;
+    }
     case 'models': {
       const target = rest[0]?.toLowerCase();
       if (!target) {
@@ -430,6 +545,7 @@ function handleSlash(
       const lines = [
         'Available commands:',
         '  /help                       Show this help',
+        '  /plan, /mode [mode]      Permission mode: ask (AUTO), acceptEdits (EDIT), plan (PLAN), bypassPermissions (BYPASS). /plan toggles PLAN — agent reads + proposes a plan, write/exec tools denied (status bar shows [PLAN]); /mode <mode> sets a specific mode.',
         '  /key [KEY]                  Set the API key for the current provider (verified against the API before saving)',
         '  /models                     List configured models (only vendors with a working API key) + supported vendors',
         '  /models <vendor> [model]    Add/switch a vendor: prompts for the model name and, if needed, the API key (verified before saving)',
@@ -439,7 +555,6 @@ function handleSlash(
         '  /clear                      Clear the current session',
         '  /exit, /quit                Exit the TUI',
         '  ESC                         Interrupt the current generation',
-        '  ↑/PageUp (terminal)         Scroll back through history (native scrollback)',
       ];
       pushNotice(setState, lines.join('\n'), 'info', 'help');
       break;

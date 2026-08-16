@@ -5,7 +5,7 @@ import { z } from 'zod';
 import ignore from 'ignore';
 import type { ToolDef, ToolContext, ToolResult } from '../types.js';
 
-export const globSchema = z.object({
+const globSchema = z.object({
   pattern: z.string().min(1),
   path: z.string().optional(),
   maxResults: z.number().int().positive().max(2000).optional(),

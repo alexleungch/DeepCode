@@ -19,6 +19,7 @@ export type EngineEvent =
   | { type: 'approval-request'; requestId: string; items: ApprovalItem[] }
   | { type: 'approval-result'; requestId: string; decisions: ApprovalDecision[] }
   | { type: 'usage'; usage: UsageEvent }
+  | { type: 'context'; ratio: number; window: number }
   | { type: 'subagent-status'; subagentId: string; label: string; status: 'running' | 'done' | 'failed' | 'merged'; detail?: string }
   | { type: 'memory-saved'; entries: { type: string; content: string }[] }
   | { type: 'compacted'; plan: CompactionPlan }

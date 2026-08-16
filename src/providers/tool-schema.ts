@@ -1,25 +1,22 @@
 import type { ToolSchema } from './types.js';
 
-/** Name pattern for tools (MCP tools, etc.) */
-export const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
-
 /**
  * Internal ToolSchema → OpenAI-compatible / Anthropic / Ollama formats.
  * Deterministic key ordering: all schema objects are serialized with keys sorted, keeping the prefix byte-stable (critical for cache hits).
  */
 
-export interface OpenAiTool {
+interface OpenAiTool {
   type: 'function';
   function: { name: string; description: string; parameters: Record<string, unknown> };
 }
 
-export interface AnthropicTool {
+interface AnthropicTool {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
 }
 
-export interface GeminiFunctionDeclaration {
+interface GeminiFunctionDeclaration {
   name: string;
   description: string;
   parameters: Record<string, unknown>;

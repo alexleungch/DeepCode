@@ -14,7 +14,3 @@ export const theme = {
   thinking: '#6e7681',
   accent: '#bc8cff',
 } as const;
-
-export function dim(s: string): string {
-  return `\x1b[2m${s}\x1b[0m`;
-}

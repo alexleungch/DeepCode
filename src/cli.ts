@@ -14,6 +14,7 @@ import { memoryCommand } from './cli/memory.js';
 import { skillsCommand } from './cli/skills.js';
 import { pluginsCommand } from './cli/plugins.js';
 import { mcpCommand } from './cli/mcp.js';
+import { telegramCommand } from './cli/telegram.js';
 import { configCommand } from './cli/config.js';
 
 export async function main(argv: string[]): Promise<void> {
@@ -41,6 +42,7 @@ export async function main(argv: string[]): Promise<void> {
   program.addCommand(skillsCommand());
   program.addCommand(pluginsCommand());
   program.addCommand(mcpCommand());
+  program.addCommand(telegramCommand());
 
   program.action(async (promptArgs: string[], options: Record<string, unknown>) => {
     const prompt = promptArgs.join(' ');
@@ -76,26 +78,48 @@ export async function main(argv: string[]): Promise<void> {
       title: prompt ? prompt.slice(0, 60) : undefined,
     });
 
-    // Interactive mode: TTY → Ink TUI; otherwise the --print renderer
-    const tui = !print && process.stdin.isTTY && process.stdout.isTTY && !options.nonInteractive;
-    if (tui) {
-      await engine.init();
-      await runTUI(engine);
-    } else if (print) {
-      const renderer = createPrintRenderer({ usage: engine.usage, verbose: !!options.verbose });
-      engine.onEvent(renderer.onEvent);
-      await engine.init();
-      if (prompt) await engine.runTurn(prompt);
-      else await interactiveLoop(engine, true);
-    } else {
-      const renderer = createPrintRenderer({ usage: engine.usage, verbose: !!options.verbose });
-      engine.onEvent(renderer.onEvent);
-      await engine.init();
-      await interactiveLoop(engine, false);
+    // Graceful shutdown on SIGINT/SIGTERM: flush memory/session/usage instead of dropping them.
+    // Ctrl+C in the TUI is handled by the UI (interrupt or graceful exit); this covers the
+    // headless/print path and external signals (e.g. `kill`).
+    let shutdownDone = false;
+    const shutdown = async () => {
+      if (shutdownDone) return;
+      shutdownDone = true;
+      try {
+        await engine.finalizeMemory();
+      } catch {
+        // never block exit on memory finalization failures
+      }
+      engine.close();
+    };
+    const onSignal = () => {
+      void shutdown().then(() => process.exit(0));
+    };
+    process.on('SIGINT', onSignal);
+    process.on('SIGTERM', onSignal);
+    try {
+      // Interactive mode: TTY → Ink TUI; otherwise the --print renderer
+      const tui = !print && process.stdin.isTTY && process.stdout.isTTY && !options.nonInteractive;
+      if (tui) {
+        await engine.init();
+        await runTUI(engine);
+      } else if (print) {
+        const renderer = createPrintRenderer({ usage: engine.usage, verbose: !!options.verbose });
+        engine.onEvent(renderer.onEvent);
+        await engine.init();
+        if (prompt) await engine.runTurn(prompt);
+        else await interactiveLoop(engine, true);
+      } else {
+        const renderer = createPrintRenderer({ usage: engine.usage, verbose: !!options.verbose });
+        engine.onEvent(renderer.onEvent);
+        await engine.init();
+        await interactiveLoop(engine, false);
+      }
+    } finally {
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
+      await shutdown();
     }
-
-    await engine.finalizeMemory();
-    engine.close();
   });
 
   await program.parseAsync(argv, { from: 'user' });

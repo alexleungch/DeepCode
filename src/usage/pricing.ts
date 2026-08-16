@@ -28,6 +28,6 @@ export function estimateCostUsd(price: PriceEntry, u: {
   return roundUsd(cost);
 }
 
-export function roundUsd(v: number): number {
+function roundUsd(v: number): number {
   return Math.round(v * 1_000_000) / 1_000_000;
 }

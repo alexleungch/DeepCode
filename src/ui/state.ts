@@ -1,7 +1,9 @@
 import type { EngineEvent } from '../events.js';
 import type { ApprovalItem } from '../tools/permission.js';
-import type { UsageTotals } from '../usage/extractor.js';
+import { emptyTotals, addToTotals, type UsageTotals } from '../usage/extractor.js';
+import { formatTokens } from '../agent/token-budget.js';
 import type { ToolResult } from '../tools/types.js';
+import type { PermissionMode } from '../config/types.js';
 
 /** TUI state: pure-function reducer over the event stream (unit-testable) */
 
@@ -11,6 +13,8 @@ export interface ToolCallView {
   input: Record<string, unknown>;
   /** Streaming argument deltas */
   inputJson: string;
+  /** Live output from the running tool (e.g. bash stdout/stderr) */
+  progress: string;
   status: 'streaming' | 'running' | 'done' | 'error' | 'denied';
   result?: ToolResult;
   durationMs?: number;
@@ -60,9 +64,15 @@ export interface TUIState {
   provider: string;
   sessionId: string;
   workspace: string;
+  /** Current permission mode (ask/acceptEdits/plan/bypassPermissions); drives the status bar badge */
+  permissionMode: PermissionMode;
   lastStopReason?: string;
   turnCount: number;
   lastCompaction?: { savedTokens: number; removedTurns: number };
+  /** Running subagents (id -> label), for the status bar counter */
+  subagents: { id: string; label: string; status: 'running' | 'done' | 'failed' | 'merged' }[];
+  /** Name of the most recently started (still running) tool, for the status bar */
+  currentTool?: string;
 }
 
 export function emptyState(): TUIState {
@@ -70,17 +80,7 @@ export function emptyState(): TUIState {
     messages: [],
     approvals: [],
     notices: [],
-    usage: {
-      requests: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      promptCacheHitTokens: 0,
-      promptCacheMissTokens: 0,
-      costUsd: 0,
-      totalTokens: 0,
-    },
+    usage: emptyTotals(),
     contextRatio: 0,
     contextWindow: 128_000,
     busy: false,
@@ -88,7 +88,9 @@ export function emptyState(): TUIState {
     provider: '',
     sessionId: '',
     workspace: '',
+    permissionMode: 'ask',
     turnCount: 0,
+    subagents: [],
   };
 }
 
@@ -107,7 +109,14 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
       return { ...state, sessionId: event.sessionId, provider: event.provider, model: event.model, workspace: event.workspace };
 
     case 'turn-start':
-      return { ...state, busy: true, turnCount: event.turn };
+      return {
+        ...state,
+        busy: true,
+        turnCount: event.turn,
+        // A new turn supersedes transient status notices (Interrupted / Error): drop the
+        // 'status' group so stale notices do not linger in the live region forever.
+        notices: state.notices.filter((n) => n.group !== 'status'),
+      };
 
     case 'text-delta': {
       const messages = [...state.messages];
@@ -139,11 +148,30 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
         messages.push({ id: ++seqId, role: 'user', text: typeof event.message.content === 'string' ? event.message.content : '', thinking: '', toolCalls: [], streaming: false, source: 'user' });
       } else if (event.source === 'assistant') {
         const last = messages[messages.length - 1];
-        const text = typeof event.message.content === 'string' ? event.message.content : event.message.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join('');
+        const blocks = typeof event.message.content === 'string' ? [] : event.message.content;
+        const text =
+          typeof event.message.content === 'string'
+            ? event.message.content
+            : blocks.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join('');
+        // The provider may deliver tool_use blocks only in the final message (no streaming
+        // tool-start events, e.g. a one-shot done response). Materialize cards here so the
+        // executor's later tool-start (same callId) dedupes in place instead of spawning a
+        // blank assistant message — otherwise the card would render on its own line below the
+        // text and the original message would never settle. Streamed cards (created from
+        // tool-start with input: {}) also get their full input filled in from the final block.
+        const toolCalls: ToolCallView[] = blocks
+          .filter((b): b is { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> } => b.type === 'tool_use')
+          .map((b) => ({ callId: b.id, name: b.name, input: b.input, inputJson: '', progress: '', status: 'streaming' as const }));
         if (last && last.role === 'assistant' && last.streaming) {
-          messages[messages.length - 1] = { ...last, text, streaming: false };
+          const merged = [...last.toolCalls];
+          for (const tc of toolCalls) {
+            const idx = merged.findIndex((m) => m.callId === tc.callId);
+            if (idx >= 0) merged[idx] = { ...merged[idx]!, input: tc.input, name: tc.name };
+            else merged.push(tc);
+          }
+          messages[messages.length - 1] = { ...last, text, toolCalls: merged, streaming: false };
         } else {
-          messages.push({ id: ++seqId, role: 'assistant', text, thinking: '', toolCalls: [], streaming: false, source: 'assistant' });
+          messages.push({ id: ++seqId, role: 'assistant', text, thinking: '', toolCalls, streaming: false, source: 'assistant' });
         }
       }
       return { ...state, messages };
@@ -153,6 +181,23 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
       return { ...state, busy: false, lastStopReason: event.stopReason };
 
     case 'tool-start': {
+      // If a tool call with this callId already exists (e.g. created from the streamed tool_use block
+      // during generation, then re-emitted by the executor with the same id), update it in place
+      // rather than appending a duplicate card. The model's tool_use id and the executor's callId are
+      // now the same value (loop.ts passes tu.id through), so this prevents the double-card / never-
+      // settles corruption described in the bug report.
+      const existingIdx = state.messages.findIndex((m) => m.toolCalls.some((tc) => tc.callId === event.callId));
+      if (existingIdx >= 0) {
+        return {
+          ...state,
+          currentTool: event.name,
+          messages: state.messages.map((m, i) =>
+            i === existingIdx
+              ? { ...m, toolCalls: m.toolCalls.map((tc) => (tc.callId === event.callId ? { ...tc, name: event.name, input: event.input, status: 'streaming' as const } : tc)) }
+              : m,
+          ),
+        };
+      }
       const messages = [...state.messages];
       let last = messages[messages.length - 1];
       // If the turn started with a tool call (e.g. Anthropic emits tool_use before any text),
@@ -163,9 +208,9 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
       }
       messages[messages.length - 1] = {
         ...last,
-        toolCalls: [...last.toolCalls, { callId: event.callId, name: event.name, input: event.input, inputJson: '', status: 'streaming' as const }],
+        toolCalls: [...last.toolCalls, { callId: event.callId, name: event.name, input: event.input, inputJson: '', progress: '', status: 'streaming' as const }],
       };
-      return { ...state, messages };
+      return { ...state, currentTool: event.name, messages };
     }
 
     case 'tool-input-delta': {
@@ -174,6 +219,22 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
         toolCalls: m.toolCalls.map((tc) =>
           tc.callId === event.callId ? { ...tc, inputJson: tc.inputJson + event.partialJson, status: 'streaming' as const } : tc,
         ),
+      }));
+      return { ...state, messages };
+    }
+
+    case 'tool-progress': {
+      // Live output from a running tool (bash stdout/stderr). Appends to the matching card
+      // (callId may be '' for tools that cannot provide one — then the last running card is used).
+      const messages = state.messages.map((m) => ({
+        ...m,
+        toolCalls: m.toolCalls.map((tc) => {
+          if (tc.callId !== event.callId) {
+            if (!event.callId && tc.status === 'running') return { ...tc, progress: tc.progress + event.text };
+            return tc;
+          }
+          return { ...tc, progress: tc.progress + event.text, status: 'running' as const };
+        }),
       }));
       return { ...state, messages };
     }
@@ -187,7 +248,7 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
             : tc,
         ),
       }));
-      return { ...state, messages };
+      return { ...state, currentTool: undefined, messages };
     }
 
     case 'approval-request': {
@@ -202,33 +263,25 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
     }
 
     case 'approval-result': {
-      return { ...state, approvals: state.approvals.map((a) => (a.requestId === event.requestId ? { ...a, resolved: true } : a)) };
+      // The turn is still running (tools execute after approval), so keep busy: true. approval-request
+      // sets it false to let the dialog take over the input area; restoring it here re-locks the input
+      // and keeps the "Running…" indicator through the tool-execution phase until turn-end.
+      return { ...state, busy: true, approvals: state.approvals.map((a) => (a.requestId === event.requestId ? { ...a, resolved: true } : a)) };
     }
+
+    case 'context':
+      return { ...state, contextRatio: event.ratio, contextWindow: event.window };
 
     case 'usage': {
       if (event.usage.partial) return state;
-      const u = event.usage;
-      return {
-        ...state,
-        usage: {
-          requests: state.usage.requests + 1,
-          inputTokens: state.usage.inputTokens + u.inputTokens,
-          outputTokens: state.usage.outputTokens + u.outputTokens,
-          cacheReadTokens: state.usage.cacheReadTokens + (u.cacheReadTokens ?? 0),
-          cacheWriteTokens: state.usage.cacheWriteTokens + (u.cacheWriteTokens ?? 0),
-          promptCacheHitTokens: state.usage.promptCacheHitTokens + (u.promptCacheHitTokens ?? 0),
-          promptCacheMissTokens: state.usage.promptCacheMissTokens + (u.promptCacheMissTokens ?? 0),
-          costUsd: Math.round((state.usage.costUsd + u.costUsd) * 1_000_000) / 1_000_000,
-          totalTokens: state.usage.totalTokens + u.inputTokens + u.outputTokens,
-        },
-      };
+      return { ...state, usage: addToTotals({ ...state.usage }, event.usage) };
     }
 
     case 'compacted':
       return {
         ...state,
         lastCompaction: { savedTokens: event.plan.savedTokens, removedTurns: event.plan.removedTurns },
-        notices: [...state.notices, { id: ++seqId, text: `Context compacted: folded ${event.plan.removedTurns} turns, saved ${formatK(event.plan.savedTokens)} tokens`, kind: 'compact' as const }].slice(-8),
+        notices: [...state.notices, { id: ++seqId, text: `Context compacted: folded ${event.plan.removedTurns} turns, saved ${formatTokens(event.plan.savedTokens)} tokens`, kind: 'compact' as const }].slice(-8),
       };
 
     case 'memory-saved':
@@ -237,17 +290,31 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
         notices: [...state.notices, { id: ++seqId, text: `Saved ${event.entries.length} memories`, kind: 'memory' as const }].slice(-8),
       };
 
-    case 'subagent-status':
+    case 'subagent-status': {
+      const others = state.subagents.filter((s) => s.id !== event.subagentId);
+      const subagents = [...others, { id: event.subagentId, label: event.label, status: event.status }];
       return {
         ...state,
+        subagents,
         notices: [...state.notices, { id: ++seqId, text: `[subagent] ${event.label}: ${event.status}`, kind: 'subagent' as const }].slice(-8),
       };
+    }
 
     case 'interrupted':
-      return { ...state, busy: false, notices: [...state.notices, { id: ++seqId, text: 'Interrupted', kind: 'info' as const }].slice(-8) };
+      // Same-group semantics: a new Interrupted/Error replaces the previous one instead of
+      // stacking, and the next turn-start drops it entirely.
+      return {
+        ...state,
+        busy: false,
+        notices: [...state.notices.filter((n) => n.group !== 'status'), { id: ++seqId, text: 'Interrupted', kind: 'info' as const, group: 'status' as const }].slice(-8),
+      };
 
     case 'error':
-      return { ...state, busy: false, notices: [...state.notices, { id: ++seqId, text: `Error: ${event.message}`, kind: 'error' as const }].slice(-8) };
+      return {
+        ...state,
+        busy: false,
+        notices: [...state.notices.filter((n) => n.group !== 'status'), { id: ++seqId, text: `Error: ${event.message}`, kind: 'error' as const, group: 'status' as const }].slice(-8),
+      };
 
     case 'session-end':
       return { ...state, busy: false };
@@ -255,10 +322,6 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
     default:
       return state;
   }
-}
-
-function formatK(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
 export function setContextInfo(state: TUIState, ratio: number, window: number): TUIState {

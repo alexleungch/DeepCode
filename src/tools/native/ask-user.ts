@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ToolDef, ToolContext, ToolResult } from '../types.js';
 
-export const askUserSchema = z.object({
+const askUserSchema = z.object({
   question: z.string().min(1),
   options: z.array(z.string().min(1)).max(9).optional(),
 });

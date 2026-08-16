@@ -6,12 +6,12 @@ import type { ToolDef, ToolContext, ToolResult, ToolPreview } from '../types.js'
 
 const MAX_WRITE_CHARS = 200_000;
 
-export const writeFileSchema = z.object({
+const writeFileSchema = z.object({
   path: z.string().min(1),
   content: z.string(),
 });
 
-export const editFileSchema = z.object({
+const editFileSchema = z.object({
   path: z.string().min(1),
   old_string: z.string().min(1),
   new_string: z.string(),

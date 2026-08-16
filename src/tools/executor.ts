@@ -6,16 +6,19 @@ import { ToolInputError } from '../providers/tool-schema.js';
 export class ToolExecutor {
   constructor(private registry: { get(name: string): ToolDef | undefined }) {}
 
-  /** Validate input and execute; returns a structured result without throwing (errors are wrapped as isError). */
-  async execute(name: string, rawInput: unknown, ctx: ToolContext): Promise<ToolResult> {
+  /** Validate input and execute; returns a structured result without throwing (errors are wrapped as isError).
+   *  @param callId  The model's tool_use id (e.g. toolu_…). Reusing it keeps a single tool card across
+   *                 the streamed tool-start, this execution, and the tool-result; callers that have no
+   *                 such id (e.g. direct tests) get a fresh random one. */
+  async execute(name: string, rawInput: unknown, ctx: ToolContext, callId?: string): Promise<ToolResult> {
     const tool = this.registry.get(name);
-    const callId = randomUUID().slice(0, 8);
+    const id = callId ?? randomUUID().slice(0, 8);
     if (!tool) {
       return { content: `Unknown tool: ${name}`, isError: true };
     }
     const input = (rawInput ?? {}) as Record<string, unknown>;
     const started = Date.now();
-    ctx.emit({ type: 'tool-start', callId, name, input });
+    ctx.emit({ type: 'tool-start', callId: id, name, input });
     let result: ToolResult;
     try {
       result = await withTimeout(tool.execute(input, ctx), ctx.config.agent.toolTimeoutMs, `Tool ${name} execution timed out (${ctx.config.agent.toolTimeoutMs}ms)`);
@@ -30,7 +33,7 @@ export class ToolExecutor {
       }
     }
     const durationMs = Date.now() - started;
-    ctx.emit({ type: 'tool-result', callId, name, result, durationMs });
+    ctx.emit({ type: 'tool-result', callId: id, name, result, durationMs });
     return result;
   }
 }
