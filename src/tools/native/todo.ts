@@ -61,13 +61,15 @@ export function makeTodoTool(store: TodoStore): ToolDef {
       required: ['todos'],
     },
     permission: 'read',
-    async execute(input: unknown, _ctx: ToolContext): Promise<ToolResult> {
+    async execute(input: unknown, ctx: ToolContext): Promise<ToolResult> {
       const parsed = todoWriteSchema.safeParse(input);
       if (!parsed.success) {
         return { content: `todo_write invalid arguments: ${parsed.error.issues.map((i) => i.message).join('; ')}`, isError: true };
       }
       store.replace(parsed.data.todos as TodoItem[]);
       const items = store.get();
+      // Keep the TUI's live todo panel in sync with the session store.
+      ctx.emit({ type: 'todo-updated', todos: items });
       const summary = items
         .map((i, n) => `${n + 1}. [${i.status === 'completed' ? 'x' : i.status === 'in_progress' ? '>' : ' '}] ${i.content}`)
         .join('\n');

@@ -33,6 +33,7 @@ export async function runDoctor(): Promise<void> {
     deepseek: () => config.providers.deepseek?.apiKey ?? process.env.DEEPSEEK_API_KEY ?? '',
     grok: () => config.providers.grok?.apiKey ?? process.env.XAI_API_KEY ?? '',
     gemini: () => config.providers.gemini?.apiKey ?? process.env.GOOGLE_API_KEY ?? '',
+    qwen: () => config.providers.qwen?.apiKey ?? process.env.DASHSCOPE_API_KEY ?? '',
   };
   for (const [pid, get] of Object.entries(keyChecks)) {
     check(`${pid} API key`, !!get(), get() ? 'configured' : 'not configured');

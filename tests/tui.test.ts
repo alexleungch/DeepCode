@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { emptyState, reduceState, addUserMessage, setContextInfo } from '../src/ui/state.js';
 import { renderMarkdown, markdownToPlain } from '../src/ui/markdown.js';
+import { friendlySummary } from '../src/ui/components/ToolCard.js';
+import type { ToolCallView } from '../src/ui/state.js';
 import type { EngineEvent } from '../src/events.js';
 
 describe('TUI state reducer', () => {
@@ -172,6 +174,35 @@ describe('TUI state reducer', () => {
     s = reduceState(s, { type: 'turn-start', turn: 2 });
     expect(s.notices).toHaveLength(0);
   });
+
+  it('todo-updated drives the live todo panel state', () => {
+    let s = emptyState();
+    expect(s.todos).toEqual([]);
+    s = reduceState(s, {
+      type: 'todo-updated',
+      todos: [
+        { content: 'scan the repo', status: 'completed' },
+        { content: 'write the report', status: 'in_progress' },
+        { content: 'send it', status: 'pending' },
+      ],
+    });
+    expect(s.todos).toHaveLength(3);
+    expect(s.todos[1]).toMatchObject({ content: 'write the report', status: 'in_progress' });
+    // A later full replacement (todo_write semantics) replaces, not appends
+    s = reduceState(s, { type: 'todo-updated', todos: [{ content: 'done', status: 'completed' }] });
+    expect(s.todos).toHaveLength(1);
+    expect(s.todos[0]!.status).toBe('completed');
+  });
+
+  it('mode notices (plan-mode banner) are cleared by the next turn so they do not stay pinned', () => {
+    let s = emptyState();
+    s.notices = [{ id: 1, text: 'Plan mode on — the agent only reads and proposes a plan; write/exec tools are denied.', kind: 'info', group: 'mode' }];
+    expect(s.notices).toHaveLength(1);
+    // The verbose banner must not linger at the bottom of the live region once a new turn starts;
+    // the persistent [PLAN] badge in the status bar is the always-visible indicator.
+    s = reduceState(s, { type: 'turn-start', turn: 1 });
+    expect(s.notices).toHaveLength(0);
+  });
 });
 
 describe('markdown renderer', () => {
@@ -214,6 +245,43 @@ describe('markdown renderer', () => {
     expect(texts[texts.length - 1]).toContain('└');
   });
 
+  it('tables tolerate rows missing the leading/trailing pipe', () => {
+    const md = '| 维度 | Pi |\n|---|----|\n 定位 | 开箱即用\n| 模型 | deepseek |';
+    const lines = renderMarkdown(md);
+    const texts = lines.map((l) => l.text);
+    // all four rows (top border, header, separator, 2 data rows, bottom border) present
+    expect(texts).toHaveLength(6);
+    expect(texts[0]).toContain('┌');
+    expect(texts.join('\n')).toContain('开箱即用');
+    expect(texts.join('\n')).toContain('deepseek');
+  });
+
+  it('tables align CJK cells by display width (not code units)', () => {
+    const lines = renderMarkdown('| 维度 | Pi |\n|---|----|\n| 模型 | deepseek |');
+    const texts = lines.map((l) => l.text);
+    // header row and data row must render with same column widths
+    const cellStart = texts[1]!.indexOf('Pi');
+    const dataStart = texts[3]!.indexOf('deepseek');
+    expect(cellStart).toBeGreaterThan(-1);
+    expect(dataStart).toBe(cellStart);
+    // every row has the same total width so the right border lines up
+    const widths = texts.filter((t) => t.startsWith('│')).map((t) => t.length);
+    expect(new Set(widths).size).toBe(1);
+  });
+
+  it('tables keep escaped pipes inside a cell', () => {
+    const lines = renderMarkdown('| a \\| b | c |\n|---|---|\n| x | y |');
+    const texts = lines.map((l) => l.text);
+    expect(texts.join('\n')).toContain('a | b');
+  });
+
+  it('plain paragraphs containing a single pipe are not treated as tables', () => {
+    const lines = renderMarkdown('foo | bar');
+    const texts = lines.map((l) => l.text);
+    expect(texts[0]).toBe('foo | bar');
+    expect(texts.some((t) => t.includes('┌'))).toBe(false);
+  });
+
   it('markdownToPlain round-trips', () => {
     const plain = markdownToPlain('# T\n\n```js\nx\n```\n\n- a');
     expect(plain).toContain('# T');
@@ -224,5 +292,67 @@ describe('markdown renderer', () => {
   it('link syntax is stripped', () => {
     const lines = renderMarkdown('see [docs](https://x.com)');
     expect(lines[0]!.text).toBe('see docs');
+  });
+});
+
+describe('tool card friendly summary', () => {
+  const card = (over: Partial<ToolCallView>): ToolCallView => ({
+    callId: 'c1',
+    name: 'read_file',
+    input: {},
+    inputJson: '',
+    progress: '',
+    status: 'streaming',
+    ...over,
+  });
+
+  it('read_file → path (+lines after completion)', () => {
+    const running = card({ name: 'read_file', input: { path: 'src/foo.ts' } });
+    expect(friendlySummary(running)).toBe('src/foo.ts');
+    const done = card({
+      name: 'read_file',
+      input: { path: 'src/foo.ts' },
+      status: 'done',
+      result: { content: '📄 src/foo.ts (120 lines total)\n     1 | x' },
+    });
+    expect(friendlySummary(done)).toBe('src/foo.ts (+120 lines)');
+  });
+
+  it('edit_file → path with ++a/−d diff stats', () => {
+    const done = card({
+      name: 'edit_file',
+      input: { path: 'src/bar.ts' },
+      status: 'done',
+      result: {
+        content: 'Wrote src/bar.ts',
+        diff: '--- a/src/bar.ts\n+++ b/src/bar.ts\n@@ -1,2 +1,3 @@\n-old\n+new\n+another',
+      },
+    });
+    expect(friendlySummary(done)).toBe('src/bar.ts (++2 −1)');
+  });
+
+  it('run_terminal_cmd → the command; glob/grep → the pattern', () => {
+    expect(friendlySummary(card({ name: 'run_terminal_cmd', input: { command: 'npm test -- --watch' } }))).toBe('npm test -- --watch');
+    expect(friendlySummary(card({ name: 'glob', input: { pattern: '**/*.ts' } }))).toBe('**/*.ts');
+    expect(friendlySummary(card({ name: 'grep', input: { pattern: 'TODO\\(' } }))).toBe('TODO\\(');
+  });
+
+  it('task → label (falls back to the task text)', () => {
+    expect(friendlySummary(card({ name: 'task', input: { label: 'write tests', task: 'long task text' } }))).toBe('write tests');
+    expect(friendlySummary(card({ name: 'task', input: { task: 'long task text' } }))).toBe('long task text');
+  });
+
+  it('streaming partial JSON is parsed best-effort (fallback …)', () => {
+    // Partial object: the committed pair is used.
+    expect(friendlySummary(card({ name: 'read_file', inputJson: '{"path":"src/foo' }))).toBe('src/foo');
+    // Complete streamed JSON overrides the one-shot input.
+    expect(friendlySummary(card({ name: 'read_file', inputJson: '{"path":"src/foo.ts"}' }))).toBe('src/foo.ts');
+    // Garbage → no args at all → "…"
+    expect(friendlySummary(card({ name: 'read_file', inputJson: '{"' }))).toBe('…');
+    expect(friendlySummary(card({ name: 'todo_write' }))).toBe('…');
+  });
+
+  it('unknown tools fall back to the first string arg', () => {
+    expect(friendlySummary(card({ name: 'skill', input: { name: 'my-skill' } }))).toBe('my-skill');
   });
 });

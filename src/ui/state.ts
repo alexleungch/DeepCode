@@ -1,5 +1,6 @@
 import type { EngineEvent } from '../events.js';
 import type { ApprovalItem } from '../tools/permission.js';
+import type { TodoItem } from '../tools/native/todo.js';
 import { emptyTotals, addToTotals, type UsageTotals } from '../usage/extractor.js';
 import { formatTokens } from '../agent/token-budget.js';
 import type { ToolResult } from '../tools/types.js';
@@ -55,6 +56,8 @@ export interface TUIState {
   approvals: ApprovalView[];
   notices: NoticeView[];
   usage: UsageTotals;
+  /** Live todo list (driven by the todo_write tool via the todo-updated event). */
+  todos: TodoItem[];
   /** Context usage ratio (0-1) */
   contextRatio: number;
   contextWindow: number;
@@ -64,6 +67,8 @@ export interface TUIState {
   provider: string;
   sessionId: string;
   workspace: string;
+  /** Current git branch (from detectRepo at session start); shown in the top Header */
+  branch: string | null;
   /** Current permission mode (ask/acceptEdits/plan/bypassPermissions); drives the status bar badge */
   permissionMode: PermissionMode;
   lastStopReason?: string;
@@ -81,6 +86,7 @@ export function emptyState(): TUIState {
     approvals: [],
     notices: [],
     usage: emptyTotals(),
+    todos: [],
     contextRatio: 0,
     contextWindow: 128_000,
     busy: false,
@@ -88,6 +94,7 @@ export function emptyState(): TUIState {
     provider: '',
     sessionId: '',
     workspace: '',
+    branch: null,
     permissionMode: 'ask',
     turnCount: 0,
     subagents: [],
@@ -106,16 +113,19 @@ export function nextSeqId(): number {
 export function reduceState(state: TUIState, event: EngineEvent): TUIState {
   switch (event.type) {
     case 'session-start':
-      return { ...state, sessionId: event.sessionId, provider: event.provider, model: event.model, workspace: event.workspace };
+      return { ...state, sessionId: event.sessionId, provider: event.provider, model: event.model, workspace: event.workspace, branch: event.branch };
 
     case 'turn-start':
       return {
         ...state,
         busy: true,
         turnCount: event.turn,
-        // A new turn supersedes transient status notices (Interrupted / Error): drop the
-        // 'status' group so stale notices do not linger in the live region forever.
-        notices: state.notices.filter((n) => n.group !== 'status'),
+        // A new turn supersedes transient status notices (Interrupted / Error) and mode notices
+        // (Shift+Tab mode switches): drop both groups so they scroll away instead of
+        // lingering pinned at the bottom of the live region forever. The persistent [PLAN] badge in
+        // the status bar is the always-visible mode indicator; the verbose banner is only a
+        // one-time announcement that the next message clears.
+        notices: state.notices.filter((n) => n.group !== 'status' && n.group !== 'mode'),
       };
 
     case 'text-delta': {
@@ -299,6 +309,9 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
         notices: [...state.notices, { id: ++seqId, text: `[subagent] ${event.label}: ${event.status}`, kind: 'subagent' as const }].slice(-8),
       };
     }
+
+    case 'todo-updated':
+      return { ...state, todos: event.todos };
 
     case 'interrupted':
       // Same-group semantics: a new Interrupted/Error replaces the previous one instead of

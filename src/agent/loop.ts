@@ -164,9 +164,9 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
         break;
       }
 
-      const observations = await runToolCalls(deps, toolUses);
-      if (observations) {
-        for (const msg of observations) {
+      const outcome = await runToolCalls(deps, toolUses);
+      if (outcome.observations) {
+        for (const msg of outcome.observations) {
           messages.push(msg);
           sessionStore.appendMessage(session.id, msg);
           // Observations (tool_result blocks, optional vision images) are internal conversation
@@ -174,9 +174,15 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
           // tool card (tool-start/tool-result events) already surfaces the result; emitting them
           // here with source:'assistant' + empty text would push a blank assistant message per batch.
         }
-      } else {
-        // all denied/aborted
+      }
+      // An aborted batch (or one where every tool was denied) ends the turn: the backfill above
+      // keeps the conversation valid for the NEXT request, but the model must not be called again
+      // within this turn.
+      if (outcome.aborted || !outcome.observations) {
         finalStopReason = 'tools-denied';
+        // When the abort came from ESC (interrupt signal), report it as an interrupt so callers
+        // (engine.runTurn, the TUI) can distinguish "user interrupted" from "tools denied".
+        if (signal.aborted) interrupted = true;
         emit({ type: 'turn-end', turn: turns + 1, stopReason: finalStopReason });
         emitContext();
         break;
@@ -228,12 +234,22 @@ function hasVisibleContent(message: ChatMessage): boolean {
   return message.content.some((b) => (b.type === 'text' && b.text.trim().length > 0) || b.type === 'tool_use');
 }
 
+/** Result of a tool batch: observation messages to append, plus whether the batch was aborted. */
+interface ToolCallOutcome {
+  /** User message(s) carrying the tool_result blocks (backfill for denied/aborted tools), or
+   *  null when every tool was denied (nothing to append). */
+  observations: ChatMessage[] | null;
+  /** True when the user aborted the batch — the turn must stop after persisting observations,
+   *  without issuing another model call. */
+  aborted: boolean;
+}
+
 /** Execute a batch of tool_use: approval → parallel execution → backfill Observations in original order;
- *  returns [observation, visionMessage?]; returns null if all are denied */
+ *  returns the observation messages (or null if all are denied), plus whether the batch was aborted */
 async function runToolCalls(
   deps: AgentLoopDeps,
   toolUses: ContentBlockToolUse[],
-): Promise<ChatMessage[] | null> {
+): Promise<ToolCallOutcome> {
   const { config, registry, executor, gate, emit, approvalHandler, signal } = deps;
 
   // 1) build approval items
@@ -308,7 +324,17 @@ async function runToolCalls(
       for (const item of pending) {
         emit({ type: 'tool-result', callId: item.callId, name: item.toolName, result: { content: 'Approval aborted', isError: true }, durationMs: 0 });
       }
-      return null;
+      // Backfill a tool_result for EVERY tool_use (pending + hard-denied) so the conversation stays
+      // valid: an assistant message ending in a bare tool_use is rejected by the APIs on the next
+      // request ("every tool_use must have a tool_result"). Previously this returned null and left
+      // an orphan tool_use persisted, poisoning the next turn with an HTTP 400.
+      const blocks = toolUses.map((tu) => ({
+        type: 'tool_result' as const,
+        toolUseId: tu.id,
+        content: pending.some((p) => p.callId === tu.id) ? 'Approval aborted' : 'Operation denied by permission rules',
+        isError: true,
+      }));
+      return { observations: [{ role: 'user', content: blocks }], aborted: true };
     }
     for (const d of result.decisions) {
       decisions.set(d.callId, d.action);
@@ -338,10 +364,20 @@ async function runToolCalls(
   }
 
   const maxParallel = Math.max(1, config.agent.maxParallelTools);
+  const settle = (callId: string, name: string, content: string) => {
+    emit({ type: 'tool-result', callId, name, result: { content, isError: true }, durationMs: 0 });
+  };
   for (let i = 0; i < allowed.length; i += maxParallel) {
     const batch = allowed.slice(i, i + maxParallel);
     await Promise.all(
       batch.map(async (tu) => {
+        // A tool starts only if the turn was not already aborted (ESC during execution/approval).
+        // The abort-aware executor then races every tool against the turn signal, so a tool that
+        // is still running when Ctrl+C arrives is killed and settles with an interrupted result.
+        if (signal.aborted) {
+          settle(tu.id, tu.name, 'Turn interrupted — tool did not start');
+          return;
+        }
         const toolCtx: ToolContext = {
           ...ctxBase,
           callId: tu.id,
@@ -356,6 +392,10 @@ async function runToolCalls(
       }),
     );
   }
+  // A batch that was interrupted mid-execution is treated as aborted: the running tools were
+  // killed by the executor (or short-circuited above), so the turn must end instead of calling
+  // the model again with a half-run batch.
+  if (signal.aborted) return { observations: [], aborted: true };
 
   // 5) backfill tool_result in original order; append an image message when screenshots exist and the model supports vision
   const blocks: ChatMessage['content'] = toolUses.map((tu) => {
@@ -385,5 +425,5 @@ async function runToolCalls(
       });
     }
   }
-  return out;
+  return { observations: out, aborted: false };
 }

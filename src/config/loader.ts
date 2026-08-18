@@ -60,6 +60,7 @@ export const API_KEY_ENV: Record<string, string> = {
   deepseek: 'DEEPSEEK_API_KEY',
   grok: 'XAI_API_KEY',
   gemini: 'GOOGLE_API_KEY',
+  qwen: 'DASHSCOPE_API_KEY',
   'openai-compat': 'DEEPCODE_API_KEY',
 };
 
@@ -104,7 +105,7 @@ export function loadConfig(opts?: { workspace?: string; model?: string; provider
 
   // env:VAR resolution + environment variable fallback
   const p = config.providers;
-  for (const pid of ['anthropic', 'deepseek', 'grok', 'gemini', 'openai-compat'] as const) {
+  for (const pid of ['anthropic', 'deepseek', 'grok', 'gemini', 'qwen', 'openai-compat'] as const) {
     const ep = p[pid];
     if (!ep) continue;
     ep.apiKey = resolveEnvValue(ep.apiKey);

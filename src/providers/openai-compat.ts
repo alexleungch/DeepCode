@@ -25,6 +25,9 @@ interface OpenAiCompatOptions {
   envKey: string;
 }
 
+/** OpenAI-compatible cache_control part (Anthropic-style content block, emulated by gateways that expose cache_control). */
+type CacheControlTextPart = { type: 'text'; text: string; cache_control: { type: 'ephemeral' } };
+
 // ---------- JSON tool calling protocol (tool calling polyfill for models without native function calling, e.g. deepseek-reasoner) ----------
 
 /** Whether to enable the JSON tool calling protocol: the model metadata explicitly declares it, or the model name contains "reasoner" */
@@ -279,15 +282,32 @@ export class OpenAiCompatProvider implements LLMProvider {
     };
   }
 
+  /**
+   * Build the OpenAI chat messages array. When the model supports explicit cache breakpoints
+   * (`cacheControl: 'explicit'`), the stable system prompt is pinned with a `cache_control` block so
+   * the provider caches that prefix across turns. The system prompt is the largest stable prefix and
+   * stays byte-identical turn-to-turn unless the permission mode injects/removes the plan-mode
+   * segment (in which case the prefix simply re-caches once — expected, only costs one extra miss).
+   */
+  private buildMessages(req: LLMRequest, jsonMode: boolean): ChatCompletionMessageParam[] {
+    const sysText = jsonMode ? buildJsonToolSystem(req.system, req.tools) : req.system;
+    const body = jsonMode ? toJsonModeMessages(req) : toOpenAiMessages(req);
+    if (this.modelMeta.cacheControl === 'explicit') {
+      const systemMsg = {
+        role: 'system',
+        content: [{ type: 'text', text: sysText, cache_control: { type: 'ephemeral' } } as CacheControlTextPart],
+      } as ChatCompletionMessageParam;
+      return [systemMsg, ...body];
+    }
+    return [{ role: 'system', content: sysText }, ...body];
+  }
+
   async complete(req: LLMRequest): Promise<LLMResponse> {
     const jsonMode = this.jsonMode && req.tools.length > 0;
     const res = await this.client.chat.completions.create(
       {
         model: this.model,
-        messages: [
-          { role: 'system', content: jsonMode ? buildJsonToolSystem(req.system, req.tools) : req.system },
-          ...(jsonMode ? toJsonModeMessages(req) : toOpenAiMessages(req)),
-        ],
+        messages: this.buildMessages(req, jsonMode),
         tools: jsonMode || req.tools.length === 0 ? undefined : toOpenAiTools(req.tools),
         // Never send a max_tokens larger than the context window: APIs validate the value and
         // reject anything above the model's output limit (DeepSeek: > 393216 → HTTP 400).
@@ -336,10 +356,7 @@ export class OpenAiCompatProvider implements LLMProvider {
     const stream = await this.client.chat.completions.create(
       {
         model: this.model,
-        messages: [
-          { role: 'system', content: jsonMode ? buildJsonToolSystem(req.system, req.tools) : req.system },
-          ...(jsonMode ? toJsonModeMessages(req) : toOpenAiMessages(req)),
-        ],
+        messages: this.buildMessages(req, jsonMode),
         tools: jsonMode || req.tools.length === 0 ? undefined : toOpenAiTools(req.tools),
         // Clamp to the context window; see complete() for why (API rejects oversized max_tokens).
         max_tokens: Math.min(req.maxTokens, this.modelMeta.windowTokens),

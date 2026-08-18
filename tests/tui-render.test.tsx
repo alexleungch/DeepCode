@@ -80,11 +80,13 @@ describe('TUI render smoke (ink-testing-library)', () => {
     );
     await new Promise((r) => setTimeout(r, 100));
     const frame = lastFrame() ?? '';
-    // With <Static> + native scrollback the layout flows top-down (no fixed-height dock), so
-    // the frame is no longer top-padded with blank lines.
+    // With the pinned layout (Header + viewport + input + status bar) the frame is not
+    // top-padded with blank lines: the Header row is the first content.
     expect(frame.startsWith('\n')).toBe(false);
-    // The status bar (info) renders after the input, i.e. closer to the bottom.
-    expect(frame.indexOf('deepseek-chat')).toBeGreaterThan(frame.indexOf('Type a message'));
+    // The status bar (bottom box) renders AFTER the input: its mode badge [AUTO] must appear
+    // lower in the frame than the input placeholder. (The model name alone is ambiguous now —
+    // it also appears in the top Header.)
+    expect(frame.indexOf('[AUTO]')).toBeGreaterThan(frame.indexOf('Type a message'));
     // The last non-empty line of the frame is the status bar bottom border.
     const nonEmpty = frame.split('\n').filter((l) => l.trim() !== '');
     expect(nonEmpty[nonEmpty.length - 1]!.trimEnd().endsWith('╯')).toBe(true);

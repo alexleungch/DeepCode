@@ -23,6 +23,13 @@ export function createProvider(config: DeepcodeConfig, providerId: ProviderId, m
         defaultBaseUrl: 'https://api.x.ai/v1',
         envKey: 'XAI_API_KEY',
       });
+    case 'qwen':
+      return new OpenAiCompatProvider(config, model, {
+        id: 'qwen',
+        label: 'Qwen (DashScope)',
+        defaultBaseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        envKey: 'DASHSCOPE_API_KEY',
+      });
     case 'gemini':
       return new GeminiProvider(config, model);
     case 'ollama':

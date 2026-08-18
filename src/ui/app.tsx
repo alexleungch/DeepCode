@@ -1,20 +1,36 @@
-import React, { useState, useEffect } from 'react';
-import { Box, Text, Static, useInput, useStdout } from 'ink';
+import React, { useState, useEffect, useRef } from 'react';
+import { Box, Text, useInput, useStdout } from 'ink';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { theme } from './theme.js';
-import { emptyState, reduceState, setContextInfo, nextSeqId, type TUIState } from './state.js';
+import { emptyState, reduceState, setContextInfo, nextSeqId, type TUIState, type MessageView } from './state.js';
+import { EventBatcher } from './event-batcher.js';
+import { messageIndexWindow, bottomStart, estimateTotalRows, estimateMessageRows } from './virtual-scroll.js';
 import { StatusBar } from './components/StatusBar.js';
+import { Header } from './components/Header.js';
 import { MessageItem } from './components/MessageList.js';
 import { ApprovalDialog } from './components/ApprovalDialog.js';
 import { PromptInput } from './components/PromptInput.js';
+import { TodoPanel } from './components/TodoPanel.js';
 import type { DeepcodeEngine } from '../engine.js';
 import { providerLabel } from '../engine.js';
+import { applyTheme, currentThemeId, resolveTheme, setActiveThemeId, themeListing } from './themes.js';
 import { API_KEY_ENV } from '../config/loader.js';
-import { providerIds, permissionModes, type PermissionMode, type ProviderId } from '../config/types.js';
+import { providerIds, type PermissionMode, type ProviderId } from '../config/types.js';
 import type { ApprovalResult } from '../tools/permission.js';
 import { formatTokens } from '../agent/token-budget.js';
+import { parseMouse, WHEEL_UP, WHEEL_DOWN } from './mouse.js';
 
 /** Main TUI: subscribes to the engine event stream -> React state -> rendering */
 export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit: () => void }) {
+  // Apply the configured theme (config ui.theme / --theme) before the first render.
+  // The palette is a mutable singleton (themeColors via applyTheme), so this also
+  // covers the /theme command: any later applyTheme() re-renders every component
+  // that reads the shared `theme` object.
+  useEffect(() => {
+    setActiveThemeId(engine.config.ui?.theme);
+    applyTheme(currentThemeId());
+  }, [engine]);
   const [state, setState] = useState<TUIState>(() => {
     const s = emptyState();
     s.sessionId = engine.session.id;
@@ -28,37 +44,79 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   const [showContext, setShowContext] = useState(false);
   // Tool card whose full diff/result is expanded (set by Enter on a tool card)
   const [expandedTool, setExpandedTool] = useState<string | null>(null);
+  // Assistant message whose collapsed thinking is expanded (set by Ctrl+O when no tool card exists)
+  const [expandedThinkingId, setExpandedThinkingId] = useState<number | null>(null);
   // Provider whose model name the user is being prompted to enter (set by /models <provider>)
   const [pendingModel, setPendingModel] = useState<ProviderId | null>(null);
   // Provider + model whose API key the user is being prompted to enter (after the model name)
   const [pendingKey, setPendingKey] = useState<{ pid: ProviderId; model: string } | null>(null);
-  // Monotonic epoch used as <Static key=...>: bumped on /clear so the write-once Static region
-  // remounts fresh instead of desyncing from the emptied message list.
-  const [staticEpoch, setStaticEpoch] = useState(0);
+  // In-app history scroll. `scrollOffset` is the index of the FIRST VISIBLE message in the full
+  // list; PageUp decreases it (reveal older), PageDown increases it (toward newer). `atBottom`
+  // pins the view to the newest message — when the user scrolls up it becomes false so new turns
+  // don't yank the view down while they're reading history. A real terminal height enables the
+  // pinned viewport + scrollbar; headless/test environments render the full list with no scrollbar.
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const [atBottom, setAtBottom] = useState(true);
+  const scrollOffsetRef = useRef(0);
+  const SCROLL_STEP = 8;
+  const WHEEL_STEP = 3;
   const { stdout } = useStdout();
-  // Track the terminal column count so a resize triggers a re-render (the rendered width is
-  // derived from it). The fixed-height dock layout was replaced by <Static> + the host terminal's
-  // native scrollback: completed messages are written to stdout once and reviewed with the
-  // terminal's own scrollbar / PageUp, so we no longer pin a fixed row count.
+  // Track the terminal column AND row count so a resize triggers a re-render. The pinned frame
+  // (Header + scroll viewport + bordered input + StatusBar) replaces the old <Static> + native
+  // scrollback design: the main area is now a fixed-height viewport that scrolls internally
+  // (PageUp/PageDown), so we no longer rely on the terminal's own scrollbar.
   const [cols, setCols] = useState(() => stdout.columns ?? 100);
+  const [rows, setRows] = useState(() => stdout.rows ?? 40);
   useEffect(() => {
-    const onResize = () => setCols(stdout.columns ?? 100);
+    const onResize = () => {
+      setCols(stdout.columns ?? 100);
+      setRows(stdout.rows ?? 40);
+    };
     stdout.on('resize', onResize);
     return () => {
       stdout.off('resize', onResize);
     };
   }, [stdout]);
   const width = Math.max(40, cols - 4);
+  // Only pin the layout to a fixed terminal height when a real row count is available (a TTY).
+  // Ink 6.8's calculateLayout constrains only the root WIDTH, never its height, so without an
+  // explicit height `flexGrow` has no definite space to distribute and the input + status bar
+  // float just below the (content-height) message area instead of sitting at the bottom. In
+  // headless/test environments `stdout.rows` is undefined, so we fall back to the old
+  // content-height layout (no fixed height, no flexGrow filling) — this also avoids Ink's
+  // log-update line-overlap artifact that only shows up when a fixed height is forced without a
+  // real terminal.
+  const fixedHeight = typeof stdout.rows === 'number' && stdout.rows > 0 ? rows : undefined;
+  // Adaptive input-box height cap: the input may grow up to 2/3 of the main conversation area so
+  // a long paste / multi-line draft stays visible without swallowing the whole screen. The main
+  // area is what remains after the pinned Header (~2 rows), the bordered input (~3 rows min),
+  // and the bordered StatusBar (~4 rows) — a ~9-row fixed overhead. The box still scrolls
+  // internally past this cap; on submit it collapses back to a single line via setBoth('', 0).
+  const fixedOverhead = 9;
+  const mainAreaRows = Math.max(3, rows - fixedOverhead);
+  const inputMaxLines = Math.max(2, Math.floor((mainAreaRows * 2) / 3));
 
-  // Mouse tracking is intentionally NOT enabled: it would make the terminal send clicks/drags to
-  // the app and break native text selection and right-click paste. We defensively turn it off once
-  // on startup in case a previous session left it on. Scrolling uses the terminal's native
-  // scrollback (completed messages are written via <Static>), so PageUp/Home/End work natively.
+  // Mouse tracking (wheel scroll) is enabled for the whole TUI session in cli.ts runTUI
+  // (`\x1b[?1000h` + SGR `\x1b[?1006h`) and disabled again on exit. Wheel events reach the
+  // useInput handler below as `[<64;…M` (up) / `[<65;…M` (down) and scroll the main viewport.
+
+  // Keep the view pinned to the newest message while `atBottom` is true. Recompute the bottom start
+  // whenever the conversation grows, or a tool card expands/collapses while at the bottom.
   useEffect(() => {
-    const s = stdout as unknown as { isTTY?: boolean };
-    if (!s.isTTY) return;
-    stdout.write('\x1b[?1000l\x1b[?1006l');
-  }, [stdout]);
+    if (!atBottom) return;
+    const bs = bottomStart(state.messages, width, mainAreaRows, {
+      expandedCallId: expandedTool,
+      expandedThinkingId: expandedThinkingId,
+    });
+    scrollOffsetRef.current = bs;
+    setScrollOffset(bs);
+  }, [atBottom, state.messages.length, width, mainAreaRows, expandedTool, expandedThinkingId]);
+
+  // Keep the mirror ref in sync with the scroll offset even when it is changed outside the main
+  // input handler (e.g. the /clear command resets it via setState).
+  useEffect(() => {
+    scrollOffsetRef.current = scrollOffset;
+  }, [scrollOffset]);
 
   // Approval bridge: engine -> dialog
   const [approval, setApproval] = useState<{ requestId: string; items: import('../tools/permission.js').ApprovalItem[] } | null>(null);
@@ -72,10 +130,16 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   const [diffExpanded, setDiffExpanded] = useState(false);
 
   useEffect(() => {
-    const off = engine.onEvent((e) => {
-      setState((s) => reduceState(s, e));
-    });
-    return off;
+    // Streaming tokens (text-delta / thinking-delta / tool-progress) can arrive much faster than
+    // React renders; batch them into ONE setState per 16ms frame instead of re-rendering per token.
+    // Control events (message / tool-result / turn-end / error / …) flush the buffer first and are
+    // applied immediately, preserving stream order. The pure reduceState is applied per batch.
+    const batcher = new EventBatcher((events) => setState((s) => events.reduce(reduceState, s)));
+    const off = engine.onEvent((e) => batcher.push(e));
+    return () => {
+      off();
+      batcher.dispose();
+    };
   }, [engine]);
 
   // Engine approval handler: driven by the TUI dialog (registered after construction)
@@ -140,11 +204,34 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
     setApprovalResolve(null);
   };
 
+  // Shared vertical-scroll primitive for PageUp/PageDown and the mouse wheel. `delta < 0` scrolls
+  // up (reveal older messages), `delta > 0` scrolls down (toward the newest). Clamped to [0, N-1];
+  // scrolling up unpins from the bottom, scrolling down re-pins once the newest message is in view.
+  const scrollBy = (delta: number) => {
+    const N = state.messages.length;
+    const no = Math.min(Math.max(0, N - 1), Math.max(0, scrollOffsetRef.current + delta));
+    scrollOffsetRef.current = no;
+    setScrollOffset(no);
+    if (delta < 0) {
+      setAtBottom(false);
+      return;
+    }
+    const win = messageIndexWindow(state.messages, width, no, mainAreaRows, {
+      expandedCallId: expandedTool,
+      expandedThinkingId: expandedThinkingId,
+    });
+    setAtBottom(win.atBottom);
+  };
+
   useInput((input, key) => {
     // Ctrl+C: while busy/interrupting → abort the current request; while idle → graceful exit
     // (unmount → engine.finalizeMemory + close so memory/session/usage are flushed, not lost).
     if (key.ctrl && (input === 'c' || input === 'C')) {
       if (state.busy || approval !== null) {
+        // With an approval dialog open, ESC/Ctrl+C must abandon the PENDING batch (resolve the
+        // approval Promise with aborted=true) instead of just aborting the model stream — otherwise
+        // runToolCalls awaits the approval forever and the UI is stuck on an unresolvable dialog.
+        if (approval !== null) abortAll();
         engine.interrupt();
       } else {
         onExit();
@@ -154,6 +241,8 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
     // Ctrl+O toggles the most recent tool card's full diff/result (only in the live region).
     // Deliberately NOT Enter — Ink fires every useInput handler, so Enter would both submit the
     // prompt input and toggle expansion; Ctrl+O is unambiguous and safe while typing.
+    // When no terminal tool card exists, Ctrl+O expands the last settled message's collapsed
+    // thinking instead (the thinking indicator stays hidden after the turn until then).
     if (key.ctrl && (input === 'o' || input === 'O')) {
       const lastTool = [...state.messages]
         .reverse()
@@ -161,12 +250,61 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
         .find((tc) => tc.status === 'done' || tc.status === 'error' || tc.status === 'denied');
       if (lastTool) {
         setExpandedTool((cur) => (cur === lastTool.callId ? null : lastTool.callId));
+      } else {
+        const lastThought = [...state.messages].reverse().find((m) => m.thinking && !m.streaming);
+        if (lastThought) {
+          setExpandedThinkingId((cur) => (cur === lastThought.id ? null : lastThought.id));
+        }
       }
       return;
     }
-    // History scrolling is delegated to the host terminal: completed messages live in <Static>
-    // and enter the terminal scrollback, so the user reviews history with the terminal's native
-    // scrollbar / PageUp / Home. No in-app scroll handling is needed here.
+    // Shift+Tab cycles the permission mode (one-key switch, per the layout/UX spec). Tab alone
+    // stays reserved for slash-command completion in PromptInput (which now ignores Shift+Tab).
+    if (key.tab && key.shift) {
+      const nm = nextMode(state.permissionMode);
+      switchMode(engine, nm, setState);
+      pushNotice(setState, `Mode → ${MODE_LABEL[nm]} (${nm}). Shift+Tab 再次切换。`, 'info', 'mode');
+      return;
+    }
+    // In-app history scroll (replaces the native terminal scrollback we dropped for the pinned
+    // layout). Shift+↑/↓ moves one message (≈ one line); PageUp/PageDown moves a page; Home/End
+    // jumps to the top/bottom. Plain ↑/↓ are left for the input box's cursor (PromptInput), so we
+    // deliberately gate line-scroll behind Shift to avoid breaking multi-line editing.
+    if (key.shift && key.upArrow) {
+      scrollBy(-1);
+      return;
+    }
+    if (key.shift && key.downArrow) {
+      scrollBy(1);
+      return;
+    }
+    if (key.pageUp) {
+      scrollBy(-SCROLL_STEP);
+      return;
+    }
+    if (key.pageDown) {
+      scrollBy(SCROLL_STEP);
+      return;
+    }
+    // Home / End (with Ctrl as a best-effort alias) jump to the very top / bottom of the history.
+    if (key.home || (key.ctrl && key.home)) {
+      scrollBy(-1e9);
+      return;
+    }
+    if (key.end || (key.ctrl && key.end)) {
+      scrollBy(1e9);
+      return;
+    }
+    // Mouse wheel over the main viewport (SGR extended mode; enabled in cli.ts). Only the press
+    // (`M`) half of each wheel pair is acted on, so every notch scrolls exactly once.
+    const mouse = parseMouse(input);
+    if (mouse) {
+      if (mouse.press && mouse.button === WHEEL_UP) scrollBy(-WHEEL_STEP);
+      else if (mouse.press && mouse.button === WHEEL_DOWN) scrollBy(WHEEL_STEP);
+      return;
+    }
+    // History scrolling is now handled above (PageUp/PageDown over the in-app viewport), so the
+    // ESC branch below only deals with cancellation / panel closing / interrupt.
     if (!key.escape) return;
     // Cancel a pending model-name / API-key entry first
     if (pendingKey) {
@@ -193,10 +331,12 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   });
 
   const onSubmit = (text: string) => {
-    // Help is transient: any new submission supersedes it so it never crowds the live region.
+    // Help and /models notices are transient: any new submission supersedes them so they never
+    // crowd the live region. This mirrors /help — the previous hint (the /models list, the
+    // "Switched to …" banner, or an API-key prompt) is replaced by your input and scrolls away.
     setState((s) =>
-      s.notices.some((n) => n.group === 'help')
-        ? { ...s, notices: s.notices.filter((n) => n.group !== 'help') }
+      s.notices.some((n) => n.group === 'help' || n.group === 'models')
+        ? { ...s, notices: s.notices.filter((n) => n.group !== 'help' && n.group !== 'models') }
         : s,
     );
     // Stage 1: a model name is being requested — the next submitted line is the model name
@@ -242,7 +382,7 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
       return;
     }
     if (text.startsWith('/')) {
-      handleSlash(text, engine, onExit, setShowCost, setShowContext, setState, setPendingModel, setPendingKey, setStaticEpoch);
+      handleSlash(text, engine, onExit, setShowCost, setShowContext, setState, setPendingModel, setPendingKey, setScrollOffset, setAtBottom, state.messages);
       return;
     }
     // User messages are added uniformly via the message event emitted at the start of runAgentTurn
@@ -251,32 +391,60 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
 
   const busy = state.busy || (approval !== null);
 
-  // Completed (settled) messages are rendered once via <Static> and pushed into the host
-  // terminal's scrollback — they are never re-rendered and can be reviewed with the terminal's
-  // native scrollbar / PageUp / Home. A message is "settled" once it is no longer streaming and
-  // every tool call has reached a terminal state (done/error/denied), which guarantees no later
-  // reducer event can mutate it — the write-once contract <Static> requires. Notices stay in the
-  // dynamic region because their group-replacement semantics violate append-only; only the most
-  // recent few are shown so they don't crowd the live area.
-  const settled = state.messages.filter(isSettled);
-  const live = state.messages.filter((m) => !isSettled(m));
-  const contentWidth = width;
+  // The main scroll viewport is a fixed-height region between the header and the input. When a real
+  // terminal height is known (fixedHeight set) we render a position-based window of the conversation
+  // (anchored to the bottom at the newest, or to the top once the user scrolls up) plus a scrollbar;
+  // headless/test environments (no rows) keep the full list with no scrollbar.
+  const win =
+    fixedHeight !== undefined
+      ? messageIndexWindow(state.messages, width, scrollOffset, mainAreaRows, {
+          expandedCallId: expandedTool,
+          expandedThinkingId: expandedThinkingId,
+        })
+      : null;
+  const renderMessages = win ? state.messages.slice(win.start, win.end) : state.messages;
+  const atBottomRender = win ? win.atBottom : true;
+  // Total estimated rows (only meaningful with a real terminal height) — used to derive the floating
+  // position hint that REPLACES the old visual scrollbar.
+  const totalRows = fixedHeight !== undefined ? estimateTotalRows(state.messages, width, { expandedCallId: expandedTool, expandedThinkingId: expandedThinkingId }) : 0;
+  let firstVisibleRow = 0;
+  if (win) {
+    for (let i = 0; i < win.start; i++) {
+      firstVisibleRow += estimateMessageRows(state.messages[i]!, width, { expandedCallId: expandedTool, expandedThinkingId: expandedThinkingId });
+    }
+  }
+  // Floating position hint that replaces the visual scrollbar: when scrolled up it reports how far
+  // through the conversation the viewport top sits (percent), how many messages are above, and a
+  // quick "jump to bottom" affordance. Null when pinned to the bottom (nothing to report).
+  const scrollHint =
+    win && !atBottomRender && totalRows > mainAreaRows
+      ? `↓ 回到底部 (End) · 上方 ${scrollOffset} 条 · ${Math.min(100, Math.max(0, Math.round((firstVisibleRow / Math.max(1, totalRows - mainAreaRows)) * 100)))}%`
+      : null;
 
   return (
-    <Box flexDirection="column">
-      <Static key={staticEpoch} items={settled}>
-        {(m) => (
-          <Box key={m.id} flexDirection="column" paddingX={1}>
-            <MessageItem m={m} width={contentWidth} />
-          </Box>
-        )}
-      </Static>
-      <Box flexDirection="column" paddingX={1}>
-        {live.map((m) => (
-          <Box key={m.id} flexDirection="column">
-            <MessageItem m={m} width={contentWidth} expandedCallId={expandedTool ?? undefined} />
-          </Box>
-        ))}
+    // Root Box is pinned to the full terminal height (fixedHeight, set when a real row count
+    // exists). Fixing the height makes flexGrow fill the middle viewport and anchors Header at
+    // the top, the message area in between, and input + StatusBar at the bottom (chat layout).
+    <Box flexDirection="column" height={fixedHeight}>
+      <Header state={state} width={width} />
+      <Box flexGrow={1} flexDirection="row" overflow="hidden" paddingX={1}>
+        <Box flexGrow={1} flexDirection="column" justifyContent={atBottomRender ? 'flex-end' : 'flex-start'} overflow="hidden">
+          {renderMessages.map((m) => (
+            <MessageItem
+              key={m.id}
+              m={m}
+              width={width}
+              expandedCallId={expandedTool ?? undefined}
+              expandedThinkingId={expandedThinkingId ?? undefined}
+            />
+          ))}
+        </Box>
+      </Box>
+      {/* Pinned overlay (always visible, above the input): todo checklist, transient notices,
+          the approval dialog, and the cost/context panels. Kept out of the scroll viewport so
+          they never scroll away during a turn. */}
+      <Box flexDirection="column" paddingX={1} flexShrink={0}>
+        <TodoPanel todos={state.todos} width={width} />
         {state.notices.slice(-5).map((n) => (
           <Box key={`n-${n.id}`} flexDirection="column" marginBottom={1}>
             <Text color={n.kind === 'error' ? theme.error : n.kind === 'compact' ? theme.warning : theme.muted}>
@@ -324,9 +492,16 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
         ) : null}
         {showCost ? <CostPanel state={state} width={width} onClose={() => setShowCost(false)} /> : null}
         {showContext ? <ContextPanel state={state} onClose={() => setShowContext(false)} /> : null}
+      </Box>
+      {/* Input box: visually distinct from history via a rounded border whose COLOR encodes the
+          active permission mode (gray=AUTO, green=EDIT, yellow=PLAN, red=BYPASS). Height is
+          adaptive — it grows with the content up to 2/3 of the main conversation area
+          (inputMaxLines) and scrolls internally past that cap; on submit it collapses to 1 line. */}
+      <Box borderStyle="round" borderColor={MODE_BORDER[state.permissionMode]} paddingX={1} flexShrink={0}>
         <PromptInput
           disabled={busy}
           width={width}
+          maxLines={inputMaxLines}
           onSubmit={onSubmit}
           placeholder={
             pendingModel
@@ -338,20 +513,22 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
                   : 'Type a message… (/help)'
           }
         />
-        <StatusBar state={state} />
       </Box>
+      <StatusBar state={state} scrollHint={scrollHint} />
     </Box>
   );
 }
 
-/** A message is settled when it will no longer be mutated by the reducer: not streaming and all
- *  tool calls terminal. <Static> requires this so its write-once output stays correct. */
-function isSettled(m: import('./state.js').MessageView): boolean {
-  if (m.streaming) return false;
-  return m.toolCalls.every((tc) => tc.status === 'done' || tc.status === 'error' || tc.status === 'denied');
+/** Apply a permission-mode switch: engine + TUI state stay in sync. */
+function switchMode(engine: DeepcodeEngine, mode: PermissionMode, setState: React.Dispatch<React.SetStateAction<TUIState>>): void {
+  engine.setMode(mode);
+  setState((s) => ({ ...s, permissionMode: mode }));
 }
 
-/** Status-bar style labels for permission modes (AUTO = the default ask mode). */
+/** Cycle order for Shift+Tab mode switching (AUTO → EDIT → PLAN → BYPASS → AUTO). */
+const MODE_CYCLE: PermissionMode[] = ['ask', 'acceptEdits', 'plan', 'bypassPermissions'];
+
+/** Status-bar / notice labels for permission modes (AUTO = the default ask mode). */
 const MODE_LABEL: Record<PermissionMode, string> = {
   ask: 'AUTO',
   acceptEdits: 'EDIT',
@@ -359,13 +536,18 @@ const MODE_LABEL: Record<PermissionMode, string> = {
   bypassPermissions: 'BYPASS',
 };
 
-/** Mode that was active before entering plan mode, restored by /plan again (singleton TUI). */
-let prevNonPlanMode: PermissionMode = 'ask';
+/** Border color of the input box per active permission mode. */
+const MODE_BORDER: Record<PermissionMode, string> = {
+  ask: theme.muted,
+  acceptEdits: theme.success,
+  plan: theme.warning,
+  bypassPermissions: theme.error,
+};
 
-/** Apply a permission-mode switch: engine + TUI state stay in sync. */
-function switchMode(engine: DeepcodeEngine, mode: PermissionMode, setState: React.Dispatch<React.SetStateAction<TUIState>>): void {
-  engine.setMode(mode);
-  setState((s) => ({ ...s, permissionMode: mode }));
+/** Next mode in the Shift+Tab cycle. */
+function nextMode(m: PermissionMode): PermissionMode {
+  const i = MODE_CYCLE.indexOf(m);
+  return MODE_CYCLE[(i + 1) % MODE_CYCLE.length]!;
 }
 
 function pushNotice(
@@ -399,6 +581,29 @@ function switchToProvider(
   }
 }
 
+/**
+ * Serialize the in-app message list to a readable markdown transcript for /export. Renders each
+ * message's text, collapsed thinking, and tool calls (name, input JSON, result). Long tool results
+ * are capped so a single huge diff doesn't blow up the file.
+ */
+function formatTranscript(messages: MessageView[]): string {
+  const lines: string[] = ['# deepcode conversation export', ''];
+  const roleLabel = (r: MessageView['role']) => (r === 'user' ? 'User' : r === 'assistant' ? 'Assistant' : 'System');
+  for (const m of messages) {
+    lines.push(`## ${roleLabel(m.role)}`);
+    if (m.thinking) lines.push('', '_Thinking:_', '', ...m.thinking.split('\n'), '');
+    if (m.text) lines.push(...m.text.split('\n'), '');
+    for (const tc of m.toolCalls) {
+      lines.push('', `### Tool: ${tc.name} \`${tc.status}\``);
+      if (tc.inputJson) lines.push('', '```json', tc.inputJson, '```', '');
+      const res = tc.result?.diff ?? tc.result?.content ?? '';
+      if (res) lines.push('', 'Result:', '', '```', res.length > 4000 ? res.slice(0, 4000) + '\n…(truncated)' : res, '```', '');
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
 function handleSlash(
   text: string,
   engine: DeepcodeEngine,
@@ -408,7 +613,9 @@ function handleSlash(
   setState: React.Dispatch<React.SetStateAction<TUIState>>,
   setPendingModel: (v: ProviderId | null) => void,
   setPendingKey: (v: { pid: ProviderId; model: string } | null) => void,
-  setStaticEpoch: (v: (e: number) => number) => void,
+  setScrollOffset: (v: (e: number) => number) => void,
+  setAtBottom: (v: boolean) => void,
+  messages: MessageView[],
 ) {
   const [cmd, ...rest] = text.slice(1).split(/\s+/);
   switch (cmd) {
@@ -420,10 +627,35 @@ function handleSlash(
     case 'clear':
       engine.session.messages = [];
       setState((s) => ({ ...s, messages: [] }));
-      // Remount <Static> so its write-once region restarts from the now-empty message list
-      // (previously written history stays in the terminal scrollback, which is intended).
-      setStaticEpoch((e) => e + 1);
+      // The main area is now an in-app scroll viewport; clearing just empties the list and
+      // resets the scroll position to the (empty) bottom.
+      setAtBottom(true);
+      setScrollOffset(() => 0);
       break;
+    case 'export': {
+      // Offload a long conversation to a file (the Claude Code "external pager / export" pattern).
+      // We write a readable markdown transcript to disk instead of suspending the TUI to run `less`
+      // — safe, cross-platform, and non-destructive to the live session.
+      if (messages.length === 0) {
+        pushNotice(setState, 'Nothing to export.', 'info', 'export');
+        break;
+      }
+      const target = rest[0];
+      const safeTs = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const outPath = target
+        ? path.isAbsolute(target)
+          ? target
+          : path.join(engine.workspace, target)
+        : path.join(engine.workspace, '.deepcode', 'exports', `session-${safeTs}.md`);
+      try {
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+        fs.writeFileSync(outPath, formatTranscript(messages), 'utf8');
+        pushNotice(setState, `Conversation exported to ${outPath} (${messages.length} messages).`, 'info', 'export');
+      } catch (e) {
+        pushNotice(setState, `Export failed: ${e instanceof Error ? e.message : String(e)}`, 'error', 'export');
+      }
+      break;
+    }
     case 'cost':
     case 'usage':
       setShowCost(true);
@@ -434,36 +666,6 @@ function handleSlash(
     case 'compact':
       void engine.compactNow();
       break;
-    case 'plan': {
-      // Toggle plan mode: on = read-only planning, off = restore the previous mode
-      const cur = engine.config.permissions.mode;
-      if (cur === 'plan') {
-        switchMode(engine, prevNonPlanMode, setState);
-        pushNotice(setState, `Plan mode off — back to ${MODE_LABEL[prevNonPlanMode]} (/${prevNonPlanMode}) mode. Write/exec tools are allowed again (subject to permission rules).`, 'info', 'mode');
-      } else {
-        prevNonPlanMode = cur;
-        switchMode(engine, 'plan', setState);
-        pushNotice(setState, 'Plan mode on — the agent only reads and proposes a plan; write/exec tools are denied. Run /plan again (or /mode) to exit.', 'info', 'mode');
-      }
-      break;
-    }
-    case 'mode': {
-      const target = rest[0]?.toLowerCase();
-      if (!target) {
-        const cur = engine.config.permissions.mode;
-        pushNotice(setState, `Current mode: ${MODE_LABEL[cur]} (/${cur}). Usage: /mode <${permissionModes.join('|')}>`, 'info', 'mode');
-        break;
-      }
-      const m = permissionModes.find((p) => p === target);
-      if (!m) {
-        pushNotice(setState, `Unknown mode "${target}". Valid modes: ${permissionModes.join(', ')}`, 'error', 'mode');
-        break;
-      }
-      if (m !== 'plan') prevNonPlanMode = m;
-      switchMode(engine, m, setState);
-      pushNotice(setState, `Permission mode: ${MODE_LABEL[m]} (/${m}).`, 'info', 'mode');
-      break;
-    }
     case 'models': {
       const target = rest[0]?.toLowerCase();
       if (!target) {
@@ -539,13 +741,29 @@ function handleSlash(
       }
       break;
     }
+    case 'theme': {
+      const target = rest[0]?.toLowerCase();
+      if (!target) {
+        const cur = engine.config.ui?.theme ?? 'default';
+        pushNotice(setState, ['Theme: ' + cur, ...themeListing()].join('\n'), 'info', 'theme');
+        break;
+      }
+      const t = resolveTheme(target);
+      try {
+        engine.setTheme(t.id, true);
+        pushNotice(setState, `Theme switched to ${t.id} (${t.name}) — ${t.description}. Persisted to ~/.deepcode/config.json.`, 'info', 'theme');
+      } catch (e) {
+        pushNotice(setState, `Failed to save theme: ${e instanceof Error ? e.message : String(e)}`, 'error', 'theme');
+      }
+      break;
+    }
     case 'help': {
       // Rendered as ONE grouped multi-line notice so it survives the dynamic region's
       // slice(-5) window intact (repeated /help replaces the previous one instead of stacking).
       const lines = [
         'Available commands:',
         '  /help                       Show this help',
-        '  /plan, /mode [mode]      Permission mode: ask (AUTO), acceptEdits (EDIT), plan (PLAN), bypassPermissions (BYPASS). /plan toggles PLAN — agent reads + proposes a plan, write/exec tools denied (status bar shows [PLAN]); /mode <mode> sets a specific mode.',
+        '  /theme [id]                 Switch the TUI theme (default, dracula, gruvbox, nord, solarized, matrix); bare /theme lists them',
         '  /key [KEY]                  Set the API key for the current provider (verified against the API before saving)',
         '  /models                     List configured models (only vendors with a working API key) + supported vendors',
         '  /models <vendor> [model]    Add/switch a vendor: prompts for the model name and, if needed, the API key (verified before saving)',
@@ -555,6 +773,11 @@ function handleSlash(
         '  /clear                      Clear the current session',
         '  /exit, /quit                Exit the TUI',
         '  ESC                         Interrupt the current generation',
+        '  Shift+Tab                   Cycle permission mode (AUTO → EDIT → PLAN → BYPASS)',
+        '  Shift+↑/↓                  Scroll history one line (up/down)',
+        '  PageUp/PageDown, wheel     Page through conversation history',
+        '  Home / End                 Jump to top / bottom of history',
+        '  /export [path]             Save the conversation to a file',
       ];
       pushNotice(setState, lines.join('\n'), 'info', 'help');
       break;

@@ -8,6 +8,7 @@
 | Anthropic | SDK default | ✅ | Explicit `cache_control` | ✅ | ✅ |
 | Gemini | `@google/genai` | ✅ | Automatic prefix caching | ✅ | ✅ |
 | Grok (xAI) | `https://api.x.ai/v1` | ✅ | Server-side automatic (best effort) | ✅ | ✅ |
+| Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | ✅ | Automatic context caching | `qwen-vl-*` ✅ | `qwen3.8-max` ✅ |
 | Ollama | `http://localhost:11434` | Per model (automatic downgrade) | In-session KV reuse | Vision models ✅ | — |
 | openai-compat | Any | ✅ | Best effort | Per model config | — |
 
@@ -18,6 +19,7 @@ set DEEPSEEK_API_KEY=sk-...      # DeepSeek
 set ANTHROPIC_API_KEY=sk-ant-... # Anthropic
 set GOOGLE_API_KEY=...           # Gemini
 set XAI_API_KEY=...              # Grok
+set DASHSCOPE_API_KEY=sk-...     # Qwen (Alibaba Cloud Model Studio / DashScope)
 set DEEPCODE_API_KEY=...         # generic compatible endpoint
 ```
 

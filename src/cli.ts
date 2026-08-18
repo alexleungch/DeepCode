@@ -27,8 +27,9 @@ export async function main(argv: string[]): Promise<void> {
     .option('-c, --continue', 'Resume the most recent session')
     .option('--resume <id>', 'Resume a specific session')
     .option('--model <model>', 'Model name (overrides config)')
-    .option('--provider <provider>', 'Provider: anthropic|deepseek|grok|gemini|ollama|openai-compat')
+    .option('--provider <provider>', 'Provider: anthropic|deepseek|grok|gemini|qwen|ollama|openai-compat')
     .option('--permission-mode <mode>', 'Permission mode: ask|acceptEdits|plan|bypassPermissions')
+    .option('--theme <id>', 'TUI theme: default|dracula|gruvbox|nord|solarized|matrix')
     .option('--worktree <mode>', 'Subagent worktree: auto|on|off')
     .option('-v, --verbose', 'Verbose output')
     .argument('[prompt...]', 'Instruction to pass directly to the agent (omit to enter interactive mode)');
@@ -57,6 +58,12 @@ export async function main(argv: string[]): Promise<void> {
       model: options.model as string | undefined,
       provider: options.provider as string | undefined,
     });
+
+    // CLI theme override (applied before the engine is created so the palette is
+    // active by the time the TUI first renders; unknown ids fall back to default)
+    if (options.theme) {
+      resolved.config.ui = { ...resolved.config.ui, theme: options.theme as string };
+    }
 
     // Resume session
     let resumeSession;
@@ -128,11 +135,31 @@ export async function main(argv: string[]): Promise<void> {
 /** Ink TUI entry */
 function runTUI(engine: DeepcodeEngine): Promise<void> {
   return new Promise((resolve) => {
+    // Enter the alternate screen buffer so deepcode takes over the whole terminal like vim/top:
+    // the previous terminal contents are preserved and restored on exit. We also hide the
+    // terminal's native cursor — the PromptInput renders its own inverse-video cursor block,
+    // and having both visible at once is confusing. Bracketed paste mode (`\x1b[?2004h`) makes
+    // the terminal wrap pasted content in `\x1b[200~ … \x1b[201~` so the input handler can
+    // treat a multi-line paste as one atomic insert instead of each `\n` triggering submit.
+    // Mouse tracking (`\x1b[?1000h` + SGR coordinates `\x1b[?1006h`) lets the TUI scroll the main
+    // viewport with the wheel; wheel events arrive as `\x1b[<64;…M` / `\x1b[<65;…M` and are
+    // parsed by the app's input handlers (see src/ui/mouse.ts).
+    const enterScreen = '\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1006h';
+    const exitScreen = '\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?25h\x1b[?1049l';
+    process.stdout.write(enterScreen);
+    // Best-effort restore if the process is killed (SIGTERM/SIGHUP) — normal exit goes through
+    // the onExit path below. 'exit' fires on process.exit() and uncaught fatal exceptions.
+    const restoreOnce = () => {
+      process.stdout.write(exitScreen);
+    };
+    process.once('exit', restoreOnce);
     const instance = render(
       React.createElement(DeepcodeTUI, {
         engine,
         onExit: () => {
           instance.unmount();
+          restoreOnce();
+          process.removeListener('exit', restoreOnce);
           resolve();
         },
       }),

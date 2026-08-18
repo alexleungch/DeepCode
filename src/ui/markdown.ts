@@ -34,8 +34,18 @@ interface StyledLine {
 
 const CODE_BLOCK_RE = /^```(\w*)\s*$/;
 const TASK_RE = /^\s*[-*+]\s+\[( |x|X)\]\s+(.*)$/;
-const TABLE_ROW_RE = /^\s*\|(.+)\|\s*$/;
-const TABLE_SEP_RE = /^\s*\|?[\s:|-]+\|?\s*$/;
+// Separator row: one or more dash cells (with optional alignment colons) separated by pipes,
+// optionally wrapped in leading/trailing pipes: `|---|---|`, `|:--|--:|`, `| --- |` or bare `---`.
+// Must be ONLY dashes/colons/spaces/pipes (no letters/digits), so `| a | --- |` stays a data row.
+const TABLE_SEP_RE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+
+/** Display width of a string in a monospace terminal (CJK/wide chars count as 2). */
+const WIDE_CHAR_RE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFF00-\uFF60\uFFE0-\uFFE6]/;
+function dlen(s: string): number {
+  let n = 0;
+  for (const ch of s) n += WIDE_CHAR_RE.test(ch) ? 2 : 1;
+  return n;
+}
 
 /** Parse inline markdown into styled segments (bold / italic / code / links / strikethrough). */
 function inline(s: string): { segments: StyledSegment[]; text: string } {
@@ -64,12 +74,55 @@ function inline(s: string): { segments: StyledSegment[]; text: string } {
   return { segments, text: segments.map((x) => x.text).join('') };
 }
 
-/** Align a markdown table block (rows of | cells |) to the widest column; returns plain text lines. */
+/**
+ * Split a markdown table row into cells.
+ * - Handles rows missing the leading or trailing pipe (common LLM output).
+ * - Handles escaped pipes inside cells (`\|` renders as a literal |).
+ */
+function splitRow(line: string): string[] {
+  let t = line.trim();
+  if (t.startsWith('|')) t = t.slice(1);
+  if (t.endsWith('|')) t = t.slice(0, -1);
+  const cells: string[] = [];
+  let cur = '';
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i]!;
+    if (ch === '\\' && t[i + 1] === '|') {
+      cur += '|';
+      i++;
+      continue;
+    }
+    if (ch === '|') {
+      cells.push(cur.trim());
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+/**
+ * Does this line look like a table data row?
+ * A strict row starts AND ends with | (the usual header form). While we are inside a
+ * table block, we also accept rows that omit one of the pipes so LLM sloppiness
+ * (`| a | b` or `a | b |`) does not break alignment.
+ */
+function looksLikeTableRow(line: string, inTable: boolean): boolean {
+  const t = line.trim();
+  if (!t.includes('|')) return false;
+  if (TABLE_SEP_RE.test(t)) return false;
+  if (/^\|.*\|\s*$/.test(t)) return true; // strict: both pipes present
+  return inTable; // lenient: only inside an already-started table
+}
+
+/** Align a markdown table block (rows of cells) to the widest column; returns plain text lines. */
 function alignTable(rows: string[][]): string[] {
   if (rows.length === 0) return [];
   const cols = Math.max(...rows.map((r) => r.length));
-  const widths = Array.from({ length: cols }, (_, c) => Math.max(...rows.map((r) => (r[c] ?? '').length)));
-  const pad = (cell: string, w: number) => cell + ' '.repeat(Math.max(0, w - cell.length));
+  const widths = Array.from({ length: cols }, (_, c) => Math.max(...rows.map((r) => dlen(r[c] ?? ''))));
+  const pad = (cell: string, w: number) => cell + ' '.repeat(Math.max(0, w - dlen(cell)));
   const fmtRow = (r: string[]) => '│ ' + Array.from({ length: cols }, (_, c) => pad(r[c] ?? '', widths[c]!)).join(' │ ') + ' │';
   const sep = '├' + widths.map((w) => '─'.repeat(w + 2)).join('┼') + '┤';
   const top = '┌' + widths.map((w) => '─'.repeat(w + 2)).join('┬') + '┐';
@@ -133,9 +186,11 @@ export function renderMarkdown(md: string): StyledLine[] {
       continue;
     }
     // Markdown table: accumulate consecutive | rows (skipping the |---| separator).
-    if (TABLE_ROW_RE.test(trimmed) && !TABLE_SEP_RE.test(trimmed)) {
-      const cells = trimmed.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
-      tableBuf.push(cells);
+    // A strict |a|b| header starts the table; inside the block we tolerate sloppy rows
+    // (missing leading/trailing pipe) so LLM output stays aligned.
+    const strictTableRow = /^\|.*\|\s*$/.test(trimmed) && !TABLE_SEP_RE.test(trimmed);
+    if (strictTableRow || (prevWasTable && looksLikeTableRow(trimmed, true))) {
+      tableBuf.push(splitRow(trimmed));
       prevWasTable = true;
       continue;
     }

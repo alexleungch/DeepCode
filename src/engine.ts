@@ -7,6 +7,7 @@ import type { DeepcodeConfig, PermissionMode, ProviderId } from './config/types.
 import { API_KEY_ENV, type ResolvedConfig } from './config/loader.js';
 import { createProvider } from './providers/factory.js';
 import type { LLMProvider } from './providers/types.js';
+import { resolveTheme, setActiveThemeId, applyTheme, currentThemeId } from './ui/themes.js';
 import { ToolRegistry } from './tools/registry.js';
 import { ToolExecutor } from './tools/executor.js';
 import { PermissionGate, type ApprovalItem, type ApprovalResult } from './tools/permission.js';
@@ -81,7 +82,14 @@ export class DeepcodeEngine {
   private listeners: EngineEventSink[] = [];
   private opts: EngineOptions;
   private closed = false;
+  /** Global process/interrupt signal shared by all runs (subagents). Retained for compatibility. */
   private abortController = new AbortController();
+  /** True while a top-level turn (runTurn) is in flight, so Ctrl+C can abandon that turn's approval */
+  private turnInFlight = false;
+  /** Per-turn interrupt: set by the first interrupt() call while a turn is in flight, reset on
+   *  the next runTurn(). This is what lets ESC interrupt the CURRENT turn (and its tools) without
+   *  poisoning later turns — a bare interrupt() when nothing is running is a no-op. */
+  private interruptRequested = false;
   private approvalHandlerOverride?: (items: ApprovalItem[]) => Promise<ApprovalResult>;
   private mcpCleanups: (() => Promise<void>)[] = [];
   private subagentRuntime: SubagentRuntime = { activeCount: 0, spawn: async () => ({ subagentId: '', label: '', report: 'Subagent not initialized', turns: 0, interrupted: false, stopReason: 'error', tokensUsed: 0, error: 'Subagent not initialized' }) };
@@ -263,7 +271,7 @@ export class DeepcodeEngine {
       userPromptFile: this.opts.resolved.paths.systemPromptFile,
     });
     (this as { systemPrompt: string }).systemPrompt = rebuilt;
-    this.emit({ type: 'session-start', sessionId: this.session.id, provider: this.config.provider, model: this.provider.model, workspace: this.workspace, resumed: !!this.opts.resumeSession });
+    this.emit({ type: 'session-start', sessionId: this.session.id, provider: this.config.provider, model: this.provider.model, workspace: this.workspace, branch: repo.branch, resumed: !!this.opts.resumeSession });
   }
 
   emit(event: EngineEvent): void {
@@ -296,13 +304,28 @@ export class DeepcodeEngine {
     this.approvalHandlerOverride = handler;
   }
 
+  /** Abandon any approval wait belonging to the in-flight turn (Ctrl+C while the dialog is open).
+   *  Returns false when there is no running turn to abandon, so callers know to treat Ctrl+C as
+   *  a graceful exit instead. */
+  abandonApproval(): boolean {
+    if (!this.turnInFlight) return false;
+    // The abort signal is what the loop's catch treats as "interrupted"; the approval promise in
+    // the TUI dialog listens to the same engine.interrupt() path via the app's abortAll().
+    // Triggering the interrupt signal here ensures runToolCalls treats the pending batch as aborted.
+    this.interrupt();
+    return true;
+  }
+
   /** Interrupt the current request (ESC) */
   interrupt(): void {
+    if (this.interruptRequested) return;
+    this.interruptRequested = true;
     this.abortController.abort();
     this.abortController = new AbortController();
   }
 
-  /** Switch the permission mode (plan / ask / acceptEdits / bypassPermissions).
+  /**
+   * Switch the permission mode (plan / ask / acceptEdits / bypassPermissions).
    *  Session-scoped: the mode is not persisted, so a restart returns to the configured default.
    *  The system prompt is rebuilt so the model knows its constraints (e.g. plan mode = read-only). */
   setMode(mode: PermissionMode): void {
@@ -316,6 +339,31 @@ export class DeepcodeEngine {
       projectDocs: [],
       userPromptFile: this.opts.resolved.paths.systemPromptFile,
     });
+  }
+
+  /**
+   * Switch the TUI theme. Updates the live config and the runtime palette; when
+   * `persist` is set the id is written to the user-level config file
+   * (~/.deepcode/config.json) so it survives restarts.
+   */
+  setTheme(id: string, persist?: boolean): void {
+    const theme = resolveTheme(id);
+    this.config.ui = { ...this.config.ui, theme: theme.id };
+    // Runtime palette switch: applyTheme() copies the palette into the shared
+    // themeColors object in place, so every component that imported `theme`
+    // from theme.ts picks up the new colors on the next render.
+    setActiveThemeId(theme.id);
+    applyTheme(currentThemeId());
+    if (persist) {
+      const file = join(this.opts.resolved.paths.dataDir, 'config.json');
+      try {
+        const existing = existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>) : {};
+        existing.ui = { ...((existing.ui as Record<string, unknown> | undefined) ?? {}), theme: theme.id };
+        writeFileSync(file, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+      } catch (e) {
+        throw new Error(`Failed to persist theme to ${file}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
   }
 
   /** Switch the model (rebuilds the provider and the system prompt) */
@@ -414,8 +462,9 @@ export class DeepcodeEngine {
         }
         case 'deepseek':
         case 'grok':
+        case 'qwen':
         case 'openai-compat': {
-          const baseUrl = ep?.baseUrl ?? (pid === 'deepseek' ? 'https://api.deepseek.com' : pid === 'grok' ? 'https://api.x.ai/v1' : undefined);
+          const baseUrl = ep?.baseUrl ?? (pid === 'deepseek' ? 'https://api.deepseek.com' : pid === 'grok' ? 'https://api.x.ai/v1' : pid === 'qwen' ? 'https://dashscope.aliyuncs.com/compatible-mode/v1' : undefined);
           const client = new OpenAI({ apiKey: key, ...(baseUrl ? { baseURL: baseUrl } : {}) });
           return client.chat.completions.create({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 });
         }
@@ -427,28 +476,34 @@ export class DeepcodeEngine {
   }
 
   async runTurn(userInput: string): Promise<TurnResult> {
+    this.turnInFlight = true;
+    this.interruptRequested = false; // a fresh turn starts interrupt-clean (idle interrupt()s earlier are scoped away)
     const handler = this.approvalHandlerOverride ?? this.opts.approvalHandler ?? this.defaultApprovalHandler;
-    return runAgentTurn(
-      {
-        config: this.config,
-        provider: this.provider,
-        modelMeta: this.provider.modelMeta,
-        registry: this.registry,
-        executor: this.executor,
-        gate: this.gate,
-        usage: this.usage,
-        session: this.session,
-        sessionStore: this.sessionStore,
-        todoStore: this.todoStore,
-        emit: (e) => this.emit(e),
-        systemPrompt: this.systemPrompt,
-        approvalHandler: handler,
-        extractFacts: this.memoryPipeline ? (turns) => this.memoryPipeline!.extractFromTurns(turns) : undefined,
-        signal: this.abortController.signal,
-        subagentRuntime: this.subagentRuntime,
-      },
-      userInput,
-    );
+    try {
+      return await runAgentTurn(
+        {
+          config: this.config,
+          provider: this.provider,
+          modelMeta: this.provider.modelMeta,
+          registry: this.registry,
+          executor: this.executor,
+          gate: this.gate,
+          usage: this.usage,
+          session: this.session,
+          sessionStore: this.sessionStore,
+          todoStore: this.todoStore,
+          emit: (e) => this.emit(e),
+          systemPrompt: this.systemPrompt,
+          approvalHandler: handler,
+          extractFacts: this.memoryPipeline ? (turns) => this.memoryPipeline!.extractFromTurns(turns) : undefined,
+          signal: this.abortController.signal,
+          subagentRuntime: this.subagentRuntime,
+        },
+        userInput,
+      );
+    } finally {
+      this.turnInFlight = false;
+    }
   }
 
   /** Session end: auto-distills memories (L0->L2) and closes the memory database */
@@ -520,6 +575,8 @@ export function providerLabel(id: ProviderId): string {
       return 'Grok (xAI)';
     case 'gemini':
       return 'Gemini';
+    case 'qwen':
+      return 'Qwen (DashScope)';
     case 'ollama':
       return 'Ollama';
     case 'openai-compat':

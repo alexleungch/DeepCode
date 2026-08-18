@@ -5,6 +5,7 @@ export const providerIds = [
   'deepseek',
   'grok',
   'gemini',
+  'qwen',
   'ollama',
   'openai-compat',
 ] as const;
@@ -93,6 +94,12 @@ export interface TelegramConfig {
   workspace?: string;
 }
 
+/** TUI appearance settings (see src/ui/themes.ts for the built-in registry) */
+export interface UiConfig {
+  /** TUI theme id (default, dracula, gruvbox, nord, solarized, matrix) */
+  theme?: string;
+}
+
 export interface AgentConfig {
   /** Max agent loop turns per conversation */
   maxTurns: number;
@@ -156,6 +163,7 @@ export interface DeepcodeConfig {
     deepseek?: ProviderEndpointConfig;
     grok?: ProviderEndpointConfig;
     gemini?: ProviderEndpointConfig;
+    qwen?: ProviderEndpointConfig;
     ollama?: { baseUrl?: string; keepAlive?: string };
     'openai-compat'?: ProviderEndpointConfig & { name?: string };
   };
@@ -169,6 +177,7 @@ export interface DeepcodeConfig {
   skills: SkillConfig;
   plugins: PluginConfig;
   telegram?: TelegramConfig;
+  ui?: UiConfig;
 }
 
 export const providerEndpointSchema = z.object({
@@ -203,6 +212,7 @@ export const deepcodeConfigSchema = z
       deepseek: providerEndpointSchema.optional(),
       grok: providerEndpointSchema.optional(),
       gemini: providerEndpointSchema.optional(),
+      qwen: providerEndpointSchema.optional(),
       ollama: z.object({ baseUrl: z.string().optional(), keepAlive: z.string().optional() }).optional(),
       'openai-compat': providerEndpointSchema.extend({ name: z.string().optional() }).optional(),
     }),
@@ -255,6 +265,11 @@ export const deepcodeConfigSchema = z
         maxBubbleChars: z.number().int().min(500).max(4000).optional(),
         permissionMode: z.enum(permissionModes).optional(),
         workspace: z.string().optional(),
+      })
+      .optional(),
+    ui: z
+      .object({
+        theme: z.string().optional(),
       })
       .optional(),
   })

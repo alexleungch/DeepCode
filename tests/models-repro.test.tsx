@@ -109,23 +109,19 @@ describe('TUI /models notices: only the latest /models output stays (list replac
     engine.close();
   });
 
-  it('notices stay visible in the live region after a later message is sent', async () => {
+  it('a later message clears the /models notice (mirrors /help behavior)', async () => {
     const { engine, inst } = await setup();
     await type(inst, '/models');
     expect(inst.lastFrame() ?? '').toContain('Available providers:');
 
-    // Send a real message: it enters <Static> (written once, pushed up into scrollback),
-    // while the /models notice stays in the dynamic live region below it.
+    // Sending a real message supersedes the /models notice, just like /help — it no longer
+    // crowds the live region below the new message.
     await type(inst, 'hello');
     await wait(300);
     const frame = inst.lastFrame() ?? '';
-    const noticeIdx = frame.indexOf('Available providers:');
-    const msgIdx = frame.indexOf('❯ hello');
-    // Both are still present (the notice is not clipped away by the new message).
-    expect(noticeIdx).toBeGreaterThan(-1);
-    expect(msgIdx).toBeGreaterThan(-1);
-    // The settled message lives in <Static> (above); the notice lives in the live region (below).
-    expect(msgIdx).toBeLessThan(noticeIdx);
+    // The /models notice is gone; only the settled message remains in the live region.
+    expect(frame).not.toContain('Available providers:');
+    expect(frame).toContain('❯ hello');
     inst.unmount();
     engine.close();
   });

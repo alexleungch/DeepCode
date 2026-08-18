@@ -118,7 +118,10 @@ afterEach(() => {
   else process.env.DEEPCODE_HOME = prevHome;
 });
 
-async function makeEngine(handler: (body: { messages: { role: string }[] }, idx: number) => string, approval?: 'allow-all' | 'deny-all') {
+async function makeEngine(
+  handler: (body: { messages: { role: string }[] }, idx: number) => string,
+  approval?: 'allow-all' | 'deny-all' | 'abort',
+) {
   script = handler;
   const resolved = loadConfig({ workspace });
   resolved.config.providers.deepseek = { apiKey: 'test-key', baseUrl };
@@ -126,6 +129,7 @@ async function makeEngine(handler: (body: { messages: { role: string }[] }, idx:
   const engine = new DeepcodeEngine({
     resolved,
     approvalHandler: async (items) => {
+      if (approval === 'abort') return { decisions: [], aborted: true };
       const decisions: ApprovalResult['decisions'] = items.map((i) => ({
         callId: i.callId,
         action: approval === 'deny-all' ? 'deny' : 'allow',
@@ -220,6 +224,39 @@ describe('integration: fake provider full loop', () => {
     // A user-denied tool must still emit tool-result (settle its card), otherwise the streamed
     // "…" card never reaches a terminal state and the assistant message stays in the live region.
     expect(events.some((e) => e.type === 'tool-result' && e.callId === 'd1')).toBe(true);
+    engine.close();
+  });
+
+  it('approval abort: backfills tool_result so the next request stays valid (no orphan tool_use)', async () => {
+    // write_file (not read_file) so the approval gate does NOT auto-allow it — the batch must
+    // reach the approval handler, which aborts it.
+    const engine = await makeEngine((body, idx) => {
+      if (idx === 0) return streamToolCalls([{ id: 'a1', name: 'write_file', args: { path: 'nope2.txt', content: 'x' } }]);
+      // Second request must contain the backfilled tool result. An orphan tool_use (assistant
+      // message with no matching result) makes the real APIs reject with HTTP 400; the handler
+      // asserting on the body is the regression guard. OpenAI-compat serializes tool_result
+      // blocks as role:'tool' messages (see openai-compat.ts toOpenAiMessages).
+      const hasToolResult = body.messages.some(
+        (m) => (m as { role?: string; tool_call_id?: string }).role === 'tool' && (m as { tool_call_id?: string }).tool_call_id === 'a1',
+      );
+      expect(hasToolResult).toBe(true);
+      return streamText('Turn continued after abort.');
+    }, 'abort');
+
+    const first = await engine.runTurn('write a file');
+    expect(first.stopReason).toBe('tools-denied');
+    expect(existsSync(join(workspace, 'nope2.txt'))).toBe(false); // aborted tools never run
+    // The persisted conversation must end with a user message carrying the aborted tool_result.
+    const last = engine.session.messages[engine.session.messages.length - 1]!;
+    expect(typeof last.content).not.toBe('string');
+    const blocks = last.content as { type: string; toolUseId?: string; isError?: boolean }[];
+    const backfill = blocks.find((b) => b.type === 'tool_result' && b.toolUseId === 'a1');
+    expect(backfill).toBeDefined();
+    expect(backfill!.isError).toBe(true);
+    expect(blocks.filter((b) => b.type === 'tool_result').length).toBe(1);
+
+    const second = await engine.runTurn('continue');
+    expect(second.stopReason).toBe('end_turn');
     engine.close();
   });
 

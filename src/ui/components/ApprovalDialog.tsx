@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Text, useInput } from 'ink';
 import { theme } from '../theme.js';
+import { parseMouse } from '../mouse.js';
 import type { ApprovalView } from '../state.js';
 import { clipLine } from '../markdown.js';
 
@@ -81,6 +82,8 @@ export function ApprovalDialog({
   diffExpanded: boolean;
 }) {
   useInput((input, key) => {
+    // Ignore SGR mouse events so wheel/clicks never register as decisions or feedback text.
+    if (parseMouse(input)) return;
     if (approval.feedbackMode) {
       if (key.return) callbacks.submitFeedback();
       else if (key.backspace || key.delete) callbacks.backspaceFeedback();

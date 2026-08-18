@@ -31,7 +31,7 @@ Claude Code-style TypeScript terminal coding agent CLI. ReAct agent loop + multi
 
 | Capability | Description |
 |---|---|
-| **Multi-provider** | DeepSeek (default) / Anthropic / Gemini / Grok / local Ollama / any OpenAI-compatible endpoint |
+| **Multi-provider** | DeepSeek (default) / Anthropic / Gemini / Grok / Qwen / local Ollama / any OpenAI-compatible endpoint |
 | **ReAct agent loop** | Perception → action → observation closed loop; parallel tool calling; automatic self-correction on non-zero exit codes |
 | **Ask approval mode (default)** | Writing files / running commands / deleting / committing / deploying pauses for human diff approval; batch approval; can attach revision feedback |
 | **Native tools** | `read_file` `write_file` `edit_file` `run_terminal_cmd` `browser_review` `glob` `grep` `todo_write` `ask_user` `skill` `task` |
@@ -133,6 +133,7 @@ deepcode "Refactor" --permission-mode acceptEdits     # skip approval for file e
     "anthropic": "claude-sonnet-4-5",
     "gemini": "gemini-2.5-pro",
     "grok": "grok-4",
+    "qwen": "qwen3.8-max",
     "ollama": "qwen3:32b"
   },
   "providers": {
@@ -140,6 +141,7 @@ deepcode "Refactor" --permission-mode acceptEdits     # skip approval for file e
     "anthropic": { "apiKey": "env:ANTHROPIC_API_KEY" },
     "gemini": { "apiKey": "env:GOOGLE_API_KEY" },
     "grok": { "apiKey": "env:XAI_API_KEY", "baseUrl": "https://api.x.ai/v1" },
+    "qwen": { "apiKey": "env:DASHSCOPE_API_KEY", "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1" },
     "ollama": { "baseUrl": "http://localhost:11434" }
   },
   "permissions": { "mode": "ask", "allow": [], "deny": [], "additionalDirectories": [] },
@@ -159,6 +161,17 @@ deepcode "Draft a README for src/"    # start a session with an initial prompt
 ```
 
 In the TUI you get streaming output, history, slash commands and `ESC` to interrupt the current generation or tool execution.
+
+The layout is pinned (Header → scroll viewport → input → status bar):
+
+| Element | Shows |
+|---|---|
+| **Header** | model · git branch (`⎇`) · cwd — narrow terminals drop branch/cwd automatically |
+| **Tool cards** | spinner / `✓` / `✗` status, per-family color, human summary (`⠋ Read (src/a.ts)`); result `⎿`-lines with git-style diff coloring (`+`green/`-`red); long results are collapsed — `Ctrl+O` expands the latest card (or the last message's hidden thinking) |
+| **Input box** | border color encodes the permission mode: gray=AUTO, green=EDIT, yellow=PLAN, red=BYPASS |
+| **Status bar** | mode badge `[AUTO]`/`[EDIT]`/`[PLAN]`/`[BYPASS]`, tokens, cost, `ctx` bar, running spinner + elapsed seconds |
+
+Keys: `Shift+Tab` cycles the permission mode; `PageUp`/`PageDown` scroll the in-app history viewport (no reliance on terminal scrollback or mouse); `Ctrl+O` expands the latest tool result/thinking; `ESC` interrupts.
 
 ### 2. Headless / script mode
 
@@ -192,11 +205,21 @@ deepcode "Deploy" --permission-mode bypassPermissions             # no approval 
 
 ```bash
 deepcode --provider anthropic --model claude-sonnet-4-5
+deepcode --provider qwen --model qwen3.8-max
 deepcode --provider ollama --model qwen3:32b
 deepcode --provider deepseek --model deepseek-reasoner
 ```
 
 Or at runtime inside the TUI: `/models deepseek deepseek-reasoner` (prompts for the model and, if needed, the API key).
+
+### 5a. Switching the TUI theme
+
+```bash
+deepcode --theme dracula       # start the TUI with the Dracula palette
+deepcode --theme matrix
+```
+
+Or at runtime inside the TUI: `/theme` lists the built-in themes, `/theme <id>` switches immediately (verified + persisted to `~/.deepcode/config.json`). Themes: `default` `dracula` `gruvbox` `nord` `solarized` `matrix`.
 
 ### 6. Configuration
 
@@ -274,6 +297,9 @@ Other public exports include `ToolRegistry`, `ToolExecutor`, `PermissionGate`, `
 
 | Command | Description |
 |---|---|
+| `/help` | Show all available slash commands |
+| `/theme` | List the available TUI themes |
+| `/theme <id>` | Switch the TUI theme (`default` `dracula` `gruvbox` `nord` `solarized` `matrix`) — persists to `~/.deepcode/config.json` |
 | `/key [KEY]` | Set the API key for the current provider (verified against the API before saving; bare `/key` shows its status) |
 | `/models` | List configured models (only vendors with a working API key) + supported vendors |
 | `/models <vendor> [model]` | Add/switch a vendor: prompts for the model name and, if needed, the API key (verified against the API before saving; persisted to `~/.deepcode/config.json`) |

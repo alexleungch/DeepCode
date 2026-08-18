@@ -83,6 +83,20 @@ export function makeBashTool(workspace: string): ToolDef {
         };
 
         const child = spawn(command, { shell: shellOpt, cwd: runCwd, stdio: ['ignore', 'pipe', 'pipe'] });
+        // ESC interrupt (ctx.signal aborts) kills the child process so a long-running command is
+        // abandoned promptly instead of running its full duration (the executor races on this
+        // signal too, but killing the OS process is what actually stops the work).
+        const onAbort = () => {
+          try {
+            if (child.exitCode === null) child.kill();
+          } catch {
+            // already exited
+          }
+        };
+        if (ctx.signal) {
+          if (ctx.signal.aborted) onAbort();
+          else ctx.signal.addEventListener('abort', onAbort, { once: true });
+        }
         const timer = setTimeout(() => {
           child.kill();
           finish({

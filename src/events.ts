@@ -4,10 +4,11 @@ import type { UsageEvent } from './usage/extractor.js';
 import type { CompactionPlan } from './agent/compressor.js';
 import type { ChatMessage } from './providers/types.js';
 import type { ProviderId } from './config/types.js';
+import type { TodoItem } from './tools/native/todo.js';
 
 /** Engine event stream: the single data channel consumed by the TUI and --print renderers */
 export type EngineEvent =
-  | { type: 'session-start'; sessionId: string; provider: ProviderId; model: string; workspace: string; resumed: boolean }
+  | { type: 'session-start'; sessionId: string; provider: ProviderId; model: string; workspace: string; branch: string | null; resumed: boolean }
   | { type: 'turn-start'; turn: number }
   | { type: 'text-delta'; text: string }
   | { type: 'thinking-delta'; text: string }
@@ -21,6 +22,7 @@ export type EngineEvent =
   | { type: 'usage'; usage: UsageEvent }
   | { type: 'context'; ratio: number; window: number }
   | { type: 'subagent-status'; subagentId: string; label: string; status: 'running' | 'done' | 'failed' | 'merged'; detail?: string }
+  | { type: 'todo-updated'; todos: TodoItem[] }
   | { type: 'memory-saved'; entries: { type: string; content: string }[] }
   | { type: 'compacted'; plan: CompactionPlan }
   | { type: 'message'; message: ChatMessage; source: 'user' | 'assistant' | 'system' | 'memory' }

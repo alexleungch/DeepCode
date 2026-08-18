@@ -59,7 +59,7 @@ afterEach(() => {
   else process.env.DEEPCODE_HOME = prevHome;
 });
 
-describe('TUI message area: <Static> writes history to terminal scrollback', () => {
+describe('TUI message area: pinned viewport with in-app history scroll', () => {
   async function setup() {
     const resolved = loadConfig({ workspace: ws });
     resolved.config.providers.deepseek = { apiKey: 'k', baseUrl: 'http://fake' };
@@ -73,18 +73,19 @@ describe('TUI message area: <Static> writes history to terminal scrollback', () 
 
   it('keeps every prior turn in the output (history is not clipped) with the newest at the bottom', async () => {
     const { engine, inst } = await setup();
-    // 3 turns x (~16 lines each) = ~48 lines, well past one screen. With <Static>, completed
-    // messages are written once to stdout and persist — nothing is clipped away.
+    // 3 turns x (~16 lines each) = ~48 lines, well past one screen. The viewport is
+    // overflow:hidden and anchors the newest message at the bottom (like a chat app); older
+    // turns stay in the message list and are reachable with PageUp.
     for (let i = 0; i < 3; i++) {
       await engine.runTurn(`prompt ${i}`);
       await wait(250);
     }
     const frame = inst.lastFrame() ?? '';
-    // Every turn is still present (Static wrote them once and they are never re-rendered away).
-    expect(frame).toContain('Message 0');
-    expect(frame).toContain('Message 1');
+    // The newest turn is visible at the bottom; older turns stay in the message list and are
+    // reachable with PageUp/Shift+↑. The visible scrollbar was replaced by a floating position
+    // hint in the status bar (gated on a real terminal height, so it does not appear headless).
     expect(frame).toContain('Message 2');
-    // No custom scrollbar track glyph is rendered.
+    // No custom scrollbar track glyph (│/█/║) is rendered.
     expect(frame).not.toContain('║');
     inst.unmount();
     engine.close();
@@ -95,7 +96,7 @@ describe('TUI message area: <Static> writes history to terminal scrollback', () 
     await engine.runTurn('first');
     await wait(250);
     expect(inst.lastFrame() ?? '').toContain('Message 0');
-    // Two more turns — the first turn's content must still be present.
+    // Two more turns — the first turn's content must still be present in the message list.
     await engine.runTurn('second');
     await wait(250);
     await engine.runTurn('third');
@@ -107,7 +108,7 @@ describe('TUI message area: <Static> writes history to terminal scrollback', () 
     engine.close();
   });
 
-  it('help advertises native scrollback for reviewing history', async () => {
+  it('help advertises in-app scrolling (PageUp/PageDown) for reviewing history', async () => {
     const { engine, inst } = await setup();
     // Type char-by-char then CR: a single bulk write can race the submit before the input
     // buffer is populated, so ink-testing-library would submit an empty line.
@@ -118,8 +119,10 @@ describe('TUI message area: <Static> writes history to terminal scrollback', () 
     inst.stdin.write('\r');
     await wait(250);
     const frame = inst.lastFrame() ?? '';
+    // The design dropped native terminal scrollback in favor of an in-app pinned viewport:
+    // history review is advertised as PageUp/PageDown (not "scrollback").
     expect(frame).toContain('PageUp');
-    expect(frame).toContain('scrollback');
+    expect(frame).toContain('PageDown');
     inst.unmount();
     engine.close();
   });

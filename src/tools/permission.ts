@@ -1,4 +1,4 @@
-import { resolve, relative, isAbsolute } from 'node:path';
+import { win32, posix } from 'node:path';
 import type { DeepcodeConfig, PermissionMode } from '../config/types.js';
 
 /** Approval item (single call or batch). */
@@ -120,14 +120,21 @@ export class PermissionGate {
     }
   }
 
-  /** Whether the path is inside the workspace (or additionalDirectories). */
+  /**
+   * Whether the path is inside the workspace (or additionalDirectories).
+   * Cross-platform: a Windows drive-letter path (C:\… / C:/…) is compared with win32 semantics
+   * even when the host is POSIX — otherwise `C:/outside` would be treated as a relative path and
+   * wrongly resolve "inside" the workspace. Non-Windows paths keep the platform semantics.
+   */
   isPathAllowed(path: string): boolean {
-    const abs = isAbsolute(path) ? path : resolve(this.workspace, path);
-    const rel = relative(this.workspace, abs);
-    if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return true;
+    const winStyle = /^[A-Za-z]:[\\/]/.test(path) || /^[A-Za-z]:[\\/]/.test(this.workspace);
+    const p = winStyle ? win32 : posix;
+    const abs = p.isAbsolute(path) ? path : p.resolve(this.workspace, path);
+    const rel = p.relative(this.workspace, abs);
+    if (rel === '' || (!rel.startsWith('..') && !p.isAbsolute(rel))) return true;
     for (const dir of this.config.permissions.additionalDirectories) {
-      const relDir = relative(dir, abs);
-      if (relDir === '' || (!relDir.startsWith('..') && !isAbsolute(relDir))) return true;
+      const relDir = p.relative(dir, abs);
+      if (relDir === '' || (!relDir.startsWith('..') && !p.isAbsolute(relDir))) return true;
     }
     return false;
   }

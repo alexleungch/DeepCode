@@ -4,6 +4,7 @@ import { theme } from '../theme.js';
 import type { TUIState } from '../state.js';
 import type { PermissionMode } from '../../config/types.js';
 import { formatTokens } from '../../agent/token-budget.js';
+import { useSpinnerFrame } from './spinner.js';
 import { basename } from 'node:path';
 
 function contextBar(ratio: number): string {
@@ -12,40 +13,14 @@ function contextBar(ratio: number): string {
   return '█'.repeat(filled) + '░'.repeat(width - filled);
 }
 
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const SPINNER_INTERVAL_MS = 100;
-
 /** Mode badge shown in the status bar. ask (the default) is labeled AUTO so the user can always
  *  see at a glance whether the agent is in normal execution or PLAN mode. */
 const MODE_BADGE: Record<PermissionMode, { label: string; color: string }> = {
-  ask: { label: 'AUTO', color: theme.success },
+  ask: { label: 'AUTO', color: theme.muted },
   acceptEdits: { label: 'EDIT', color: theme.success },
   plan: { label: 'PLAN', color: theme.warning },
   bypassPermissions: { label: 'BYPASS', color: theme.error },
 };
-
-/**
- * Animated spinner frame while a request is running.
- *
- * A plain glyph would render once and freeze because no events fire during e.g. a slow tool run.
- * The interval lives for the whole component lifetime and only advances the visible frame while
- * `busy` is true (a ref avoids re-rendering while idle). This is more reliable than starting the
- * interval in a `useEffect` gated on `busy`: the effect restarts every time busy toggles (turns,
- * approval dialogs), and between restarts the icon can look frozen.
- */
-function useSpinnerFrame(busy: boolean): string {
-  const [tick, setTick] = useState(0);
-  const busyRef = useRef(busy);
-  busyRef.current = busy;
-  useEffect(() => {
-    const id = setInterval(() => {
-      // Returning the same tick while idle makes React bail out (no re-render).
-      setTick((t) => (busyRef.current ? t + 1 : t));
-    }, SPINNER_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, []);
-  return SPINNER_FRAMES[tick % SPINNER_FRAMES.length]!;
-}
 
 /** Elapsed seconds of the current busy period (0 when idle). */
 function useElapsed(busy: boolean): number {
@@ -70,7 +45,7 @@ function shortPath(p: string): string {
 }
 
 /** Bottom status bar: model/provider · directory · mode · tokens and cost · context usage */
-export function StatusBar({ state }: { state: TUIState }) {
+export function StatusBar({ state, scrollHint }: { state: TUIState; scrollHint?: string | null }) {
   const u = state.usage;
   const cost = u.costUsd < 0.01 ? `${u.costUsd.toFixed(4)}` : `${u.costUsd.toFixed(2)}`;
   const cacheHit = u.cacheReadTokens + u.promptCacheHitTokens;
@@ -122,6 +97,7 @@ export function StatusBar({ state }: { state: TUIState }) {
           ctx {contextBar(state.contextRatio)} {pct}%
         </Text>
         <Text color={theme.muted}>{state.lastStopReason ?? ''}</Text>
+        {scrollHint ? <Text color={theme.warning} bold>{scrollHint}</Text> : null}
       </Box>
     </Box>
   );

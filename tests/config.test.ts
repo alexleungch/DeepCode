@@ -74,6 +74,42 @@ describe('loadConfig', () => {
     expect(r.config.models['ollama']).toBe('qwen2.5-coder:32b');
     expect(r.model).toBe('qwen2.5-coder:32b');
   });
+
+  it('qwen provider validates and resolves the DashScope default baseUrl + default model', () => {
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ provider: 'qwen' }), 'utf8');
+    const r = loadConfig({ workspace });
+    expect(r.config.provider).toBe('qwen');
+    expect(r.model).toBe('qwen3.8-max'); // DEFAULT_MODELS.qwen
+    expect(r.config.providers.qwen?.baseUrl).toBe('https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1');
+    expect(r.config.models['qwen']).toBe('qwen3.8-max');
+  });
+
+  it('qwen providers.qwen apiKey resolves from env:VAR', () => {
+    process.env.TEST_QWEN_KEY = 'sk-qwen-secret';
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, 'config.json'),
+      JSON.stringify({ provider: 'qwen', providers: { qwen: { apiKey: 'env:TEST_QWEN_KEY' } } }),
+      'utf8',
+    );
+    const r = loadConfig({ workspace });
+    expect(r.config.providers.qwen?.apiKey).toBe('sk-qwen-secret');
+    delete process.env.TEST_QWEN_KEY;
+  });
+
+  it('qwen falls back to the DASHSCOPE_API_KEY environment variable', () => {
+    process.env.DASHSCOPE_API_KEY = 'sk-dashscope-env';
+    const r = loadConfig({ workspace, provider: 'qwen' });
+    expect(r.config.providers.qwen?.apiKey).toBe('sk-dashscope-env');
+    delete process.env.DASHSCOPE_API_KEY;
+  });
+
+  it('unknown provider strings still fail validation', () => {
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ provider: 'bogus-provider' }), 'utf8');
+    expect(() => loadConfig({ workspace })).toThrow(/Config validation failed/);
+  });
 });
 
 describe('mergeConfig / modelMetaFor / pricingFor', () => {
@@ -142,5 +178,17 @@ describe('max_tokens safety (regression: DeepSeek 400 "valid range of max_tokens
     const cfg = defaultConfig();
     expect(pricingFor(cfg, 'deepseek-v4-flash').input).toBe(0.14);
     expect(pricingFor(cfg, 'deepseek-v4-flash').output).toBe(0.28);
+  });
+
+  it('qwen3.8-max builtin metadata: 1M window, 32K output cap, thinking + tools', () => {
+    const cfg = defaultConfig();
+    const meta = modelMetaFor(cfg, 'qwen3.8-max');
+    expect(meta.windowTokens).toBe(1_000_000);
+    expect(meta.maxOutputTokens).toBe(32_768);
+    expect(meta.supportsTools).toBe(true);
+    expect(meta.supportsThinking).toBe(true);
+    expect(meta.cacheControl).toBe('explicit');
+    expect(pricingFor(cfg, 'qwen3.8-max').input).toBe(2);
+    expect(pricingFor(cfg, 'qwen3.8-max').output).toBe(6);
   });
 });

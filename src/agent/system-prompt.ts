@@ -67,9 +67,13 @@ ${input.skillsCatalog}`);
   }
 
   // ⑥ tools catalog + usage rules
+  // NOTE: only the tool NAMES are listed here on purpose — the full JSON Schema (with parameter
+  // descriptions) is transmitted separately in every request's `tools` field, so repeating the
+  // descriptions here would double the tool tokens and bloat the (cached) system-prefix. This keeps
+  // the prefix smaller and the cache hit rate higher.
   sections.push(`# Tools
-You can use the following tools (arguments must conform to the JSON Schema):
-${tools.map((t) => `- ${t.name}: ${t.description}`).join('\n')}
+You can use the following tools (parameter schemas are provided in the tool definitions; arguments must conform to each tool's JSON Schema):
+${tools.map((t) => `- ${t.name}`).join('\n')}
 
 Usage rules:
 - Prefer read_file/glob/grep for reading code; do not blindly read everything

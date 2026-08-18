@@ -30,7 +30,10 @@ export async function createWorktree(workspace: string, label: string): Promise<
     if (status.files.length > 0 || status.not_added.length > 0) return null; // Dirty working tree
     const baseDir = await mkdtemp(join(tmpdir(), 'deepcode-wt-'));
     const path = join(baseDir, 'worktree');
-    const branch = `deepcode/sub-${label}`;
+    // git 2.55 (Windows) rejects `worktree add -b` when the new branch name contains a slash
+    // ("fatal: invalid reference: deepcode/sub-…"); the branch is internal-only (never shown or
+    // merged by name), so sanitize it to a flat, still-unique name. Harmless on other platforms.
+    const branch = `deepcode/sub-${label}`.replace(/[^\w.-]+/g, '-');
     const baseRef = (await git.revparse(['HEAD'])).trim();
     await git.raw(['worktree', 'add', '-b', branch, path]);
     const wtGit = simpleGit(path);

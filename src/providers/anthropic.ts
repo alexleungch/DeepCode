@@ -155,6 +155,8 @@ export class AnthropicProvider implements LLMProvider {
     let outputTokens = 0;
     let stopReason: LLMResponse['stopReason'] = 'end_turn';
     const toolBlocks = new Map<number, ContentBlockToolUse>();
+    // Concatenated input_json_delta fragments per tool block (see appendToolJson / parseToolInput).
+    const rawInputs = new Map<number, string>();
 
     for await (const event of stream) {
       switch (event.type) {
@@ -167,6 +169,7 @@ export class AnthropicProvider implements LLMProvider {
           if (event.content_block.type === 'tool_use') {
             const id = event.content_block.id;
             toolBlocks.set(event.index, { type: 'tool_use', id, name: event.content_block.name, input: {} });
+            rawInputs.set(event.index, '');
             yield { type: 'tool-start', id, name: event.content_block.name };
           }
           break;
@@ -179,11 +182,20 @@ export class AnthropicProvider implements LLMProvider {
           } else if (delta.type === 'input_json_delta' && delta.partial_json !== undefined) {
             const block = toolBlocks.get(event.index);
             if (block) {
-              block.input = mergePartialJson(block.input, delta.partial_json);
+              rawInputs.set(event.index, appendToolJson(rawInputs.get(event.index) ?? '', delta.partial_json));
               yield { type: 'tool-input-delta', id: block.id, partialJson: delta.partial_json };
             }
           } else if (delta.type === 'thinking_delta' && delta.thinking !== undefined) {
             yield { type: 'thinking-delta', text: delta.thinking };
+          }
+          break;
+        }
+        case 'content_block_stop': {
+          // Tool arguments are only complete when the block stops: parse the concatenated
+          // fragments here so the final tool_use carries real input.
+          const block = toolBlocks.get(event.index);
+          if (block && rawInputs.has(event.index)) {
+            block.input = parseToolInput(rawInputs.get(event.index) ?? '');
           }
           break;
         }
@@ -196,6 +208,13 @@ export class AnthropicProvider implements LLMProvider {
       }
     }
     void text;
+    // Defensive: the stream can end without a trailing content_block_stop — parse any block that
+    // still has empty input so tool arguments are never silently dropped.
+    for (const [index, block] of toolBlocks) {
+      if (Object.keys(block.input).length === 0 && rawInputs.has(index)) {
+        block.input = parseToolInput(rawInputs.get(index) ?? '');
+      }
+    }
     const content: ChatMessage['content'] = [];
     content.push(...toolBlocks.values());
     yield { type: 'usage', usage: { inputTokens, outputTokens, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite } };
@@ -237,26 +256,24 @@ function mapStopReason(reason: Anthropic.Message['stop_reason']): LLMResponse['s
   }
 }
 
-/** Incrementally merge tool_use input JSON (streaming partial_json) */
-function mergePartialJson(current: Record<string, unknown>, partial: string): Record<string, unknown> {
-  if (!partial) return current;
-  const keys = Object.keys(current);
-  if (keys.length === 0) {
-    // No content yet: try to parse
-    try {
-      const parsed = JSON.parse(partial);
-      if (parsed && typeof parsed === 'object') return { ...parsed };
-    } catch {
-      return current;
-    }
-  } else {
-    // Already has content: merge the delta across all keys (brute-force replay: parse the latest complete value)
-    try {
-      const parsed = JSON.parse(partial) as Record<string, unknown>;
-      if (parsed && typeof parsed === 'object') return { ...parsed };
-    } catch {
-      // Keep as-is
-    }
+/**
+ * Accumulate streaming tool-input JSON fragments. Anthropic delivers tool arguments as a sequence
+ * of `input_json_delta` events whose `partial_json` fields are raw fragments that only form valid
+ * JSON once CONCATENATED (e.g. `{"path"` + `:"a.ts"` + `}`). Parsing each fragment in isolation
+ * (as the old mergePartialJson did) always fails, leaving tool inputs empty and breaking every
+ * tool call. Mirrors the OpenAI-compatible provider's `acc.args += …` accumulation.
+ */
+export function appendToolJson(buffer: string, fragment: string): string {
+  return buffer + fragment;
+}
+
+/** Parse an accumulated tool-input JSON string; falls back to a `_raw` marker when the stream cut off. */
+export function parseToolInput(raw: string): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : { _raw: raw };
+  } catch {
+    return { _raw: raw };
   }
-  return current;
 }

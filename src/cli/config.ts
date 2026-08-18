@@ -37,6 +37,7 @@ export function configCommand(): Command {
           anthropic: 'claude-sonnet-4-5',
           gemini: 'gemini-2.5-pro',
           grok: 'grok-4',
+          qwen: 'qwen3.8-max',
           ollama: 'qwen3:32b',
         },
         providers: {
@@ -44,6 +45,7 @@ export function configCommand(): Command {
           anthropic: { apiKey: 'env:ANTHROPIC_API_KEY' },
           gemini: { apiKey: 'env:GOOGLE_API_KEY' },
           grok: { apiKey: 'env:XAI_API_KEY', baseUrl: 'https://api.x.ai/v1' },
+          qwen: { apiKey: 'env:DASHSCOPE_API_KEY', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
           ollama: { baseUrl: 'http://localhost:11434' },
         },
         permissions: { mode: 'ask', allow: [], deny: [], additionalDirectories: [] },

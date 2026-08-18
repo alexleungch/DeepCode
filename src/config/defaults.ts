@@ -104,6 +104,52 @@ export const BUILTIN_MODEL_META: Record<string, ModelMeta> = {
     supportsThinking: false,
     cacheControl: 'none',
   },
+  // Qwen (Alibaba Cloud DashScope / MaaS OpenAI-compatible endpoint; supports explicit cache_control breakpoints)
+  'qwen3.8-max': {
+    id: 'qwen3.8-max',
+    windowTokens: 1_000_000,
+    maxOutputTokens: 32_768, // thinking-mode output cap (normal mode caps at 65,536)
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: true,
+    cacheControl: 'explicit',
+  },
+  'qwen-plus': {
+    id: 'qwen-plus',
+    windowTokens: 1_000_000,
+    maxOutputTokens: 32_768,
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: true,
+    cacheControl: 'explicit',
+  },
+  'qwen3-coder-plus': {
+    id: 'qwen3-coder-plus',
+    windowTokens: 1_000_000,
+    maxOutputTokens: 32_768,
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: true,
+    cacheControl: 'explicit',
+  },
+  'qwen-vl-plus': {
+    id: 'qwen-vl-plus',
+    windowTokens: 128_000,
+    maxOutputTokens: 32_768,
+    supportsVision: true,
+    supportsTools: true,
+    supportsThinking: false,
+    cacheControl: 'explicit',
+  },
+  'qwen-flash': {
+    id: 'qwen-flash',
+    windowTokens: 1_000_000,
+    maxOutputTokens: 32_768,
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: false,
+    cacheControl: 'explicit',
+  },
   // Ollama local models (override per model capability; KV reuse within a session)
   'qwen3:32b': {
     id: 'qwen3:32b',
@@ -145,6 +191,7 @@ export const DEFAULT_MODELS: Record<ProviderId, string> = {
   deepseek: 'deepseek-chat',
   grok: 'grok-4',
   gemini: 'gemini-2.5-pro',
+  qwen: 'qwen3.8-max',
   ollama: 'qwen3:32b',
   'openai-compat': 'custom-model',
 };
@@ -165,6 +212,12 @@ export const BUILTIN_PRICING: Record<string, PriceEntry> = {
   'gemini-2.5-flash': { input: 0.3, output: 2.5, cacheRead: 0.075 },
   'grok-4': { input: 3, output: 15 },
   'grok-4-fast': { input: 0.2, output: 0.5 },
+  // Qwen cloud (DashScope) — approximate entry-tier rates (USD/1M tokens); overridable via config.pricing
+  'qwen3.8-max': { input: 2, output: 6 },
+  'qwen-plus': { input: 0.4, output: 1.2 },
+  'qwen3-coder-plus': { input: 0.574, output: 2.294 },
+  'qwen-vl-plus': { input: 0.4, output: 1.2 },
+  'qwen-flash': { input: 0.05, output: 0.4 },
   'ollama-local': { input: 0, output: 0 },
 };
 
@@ -178,6 +231,7 @@ export function defaultConfig(): DeepcodeConfig {
       anthropic: {},
       grok: { baseUrl: 'https://api.x.ai/v1' },
       gemini: {},
+      qwen: { baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1' },
       ollama: { baseUrl: 'http://localhost:11434' },
       'openai-compat': {},
     },
@@ -189,7 +243,8 @@ export function defaultConfig(): DeepcodeConfig {
     },
     context: {
       maxTokens: 128_000,
-      compactAt: 0.7,
+      // Compact earlier (76.8k vs 89.6k) so long sessions carry less full history per turn.
+      compactAt: 0.6,
       autoCompact: true,
       keepRecentTurns: 5,
       maxSummaryTokens: 4000,
@@ -221,6 +276,9 @@ export function defaultConfig(): DeepcodeConfig {
       maxBubbleChars: 3500,
       permissionMode: 'acceptEdits',
     },
+    ui: {
+      theme: 'default',
+    },
   };
 }
 
@@ -242,6 +300,7 @@ export function mergeConfig(base: DeepcodeConfig, patch: Partial<DeepcodeConfig>
     skills: { ...base.skills, ...patch.skills },
     plugins: { ...base.plugins, ...patch.plugins },
     telegram: { ...base.telegram, ...patch.telegram },
+    ui: { ...base.ui, ...patch.ui },
   };
 }
 

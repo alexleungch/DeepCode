@@ -35,20 +35,26 @@ afterEach(() => {
 
 describe('full TUI spinner during tool run', () => {
   it('spinner animates while a slow tool is executing', async () => {
+    // Two-phase provider modelling the real agentic loop: call #1 asks for a slow tool
+    // (run_terminal_cmd 'sleep 2'), call #2 (after the tool finished) returns the final text.
+    let call = 0;
     const provider: LLMProvider = {
       id: 'deepseek',
       model: 'deepseek-chat',
       modelMeta: { id: 'deepseek-chat', windowTokens: 128_000, supportsVision: false, supportsTools: true, cacheControl: 'auto' },
       async *stream(_req: LLMRequest): AsyncIterable<LLMStreamEvent> {
-        yield { type: 'text-delta', text: 'Calling tool' };
-        yield {
-          type: 'done',
-          response: {
-            message: { role: 'assistant', content: [{ type: 'text', text: 'Calling tool' }, { type: 'tool_use', id: 'c1', name: 'bash', input: { command: 'sleep 2' } }] },
-            usage: { inputTokens: 10, outputTokens: 5 },
-            stopReason: 'tool_use',
-          },
-        };
+        if (call++ === 0) {
+          yield { type: 'text-delta', text: 'Calling tool' };
+          yield {
+            type: 'done',
+            response: {
+              message: { role: 'assistant', content: [{ type: 'text', text: 'Calling tool' }, { type: 'tool_use', id: 'c1', name: 'run_terminal_cmd', input: { command: 'sleep 2' } }] },
+              usage: { inputTokens: 10, outputTokens: 5 },
+              stopReason: 'tool_use',
+            },
+          };
+          return;
+        }
         yield { type: 'text-delta', text: 'Tool done' };
         yield { type: 'done', response: { message: { role: 'assistant', content: 'Tool done' }, usage: { inputTokens: 10, outputTokens: 5 }, stopReason: 'end_turn' } };
       },
@@ -61,8 +67,8 @@ describe('full TUI spinner during tool run', () => {
     resolved.config.providers.deepseek = { apiKey: 'k', baseUrl: 'http://fake' };
     const engine = new DeepcodeEngine({ resolved });
     engine.provider = provider as never;
-    // Auto-allow bash so no approval dialog pauses busy
-    engine.gate.remember({ callId: 'x', toolName: 'bash', command: 'sleep 2', risk: 'low' as never, action: 'allow-always' });
+    // Auto-allow the terminal tool so no approval dialog pauses busy
+    engine.gate.remember({ callId: 'x', toolName: 'run_terminal_cmd', command: 'sleep 2', risk: 'low' as never, action: 'allow-always' });
     await engine.init();
     const { lastFrame, unmount } = render(React.createElement(DeepcodeTUI, { engine, onExit: () => undefined }));
 
@@ -77,8 +83,10 @@ describe('full TUI spinner during tool run', () => {
     unmount();
     engine.close();
 
+    // The spinner glyph animates on the tool card (⠸ Bash (sleep 2)) and/or the status bar
+    // (⠋ Running). Both draw from the same SPINNER_FRAMES set.
     const glyphs = frames.map((f) => {
-      const m = f.match(/([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]) Running/);
+      const m = f.match(/([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])\s+(?:Bash \(|Running)/);
       return m ? m[1] : null;
     });
     console.log('TOOL GLYPHS:', JSON.stringify(glyphs));
