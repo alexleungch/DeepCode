@@ -32,7 +32,10 @@ export function createPrintRenderer(opts: PrintRendererOptions) {
         break;
       }
       case 'tool-progress':
+        // Live tool output in --print mode (e.g. bash stdout). Capped per event so a noisy tool
+        // doesn't flood the terminal; the final result is still printed by 'tool-result' below.
         toolOutput += event.text;
+        process.stdout.write(event.text.length > 2000 ? event.text.slice(0, 2000) + '…\n' : event.text);
         break;
       case 'tool-result': {
         const body = event.result.content.replace(/\n/g, '\n  ').slice(0, 2000);
@@ -67,6 +70,9 @@ export function createPrintRenderer(opts: PrintRendererOptions) {
         break;
       case 'error':
         process.stdout.write(`\n[error] ${event.message}\n`);
+        break;
+      case 'delegated':
+        process.stdout.write(`\n[delegated] ${event.label} finished in ${event.turns} turns\n`);
         break;
       case 'session-end':
         process.stdout.write('\n');

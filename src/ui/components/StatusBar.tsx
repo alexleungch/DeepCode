@@ -5,6 +5,7 @@ import type { TUIState } from '../state.js';
 import type { PermissionMode } from '../../config/types.js';
 import { formatTokens } from '../../agent/token-budget.js';
 import { useSpinnerFrame } from './spinner.js';
+import { clipLine } from '../markdown.js';
 import { basename } from 'node:path';
 
 function contextBar(ratio: number): string {
@@ -22,8 +23,10 @@ const MODE_BADGE: Record<PermissionMode, { label: string; color: string }> = {
   bypassPermissions: { label: 'BYPASS', color: theme.error },
 };
 
-/** Elapsed seconds of the current busy period (0 when idle). */
-function useElapsed(busy: boolean): number {
+/** Elapsed seconds of the current busy period (0 when idle).
+ *  Returns formatted string: "s" for < 60s, "m:ss" for longer.
+ */
+function useElapsed(busy: boolean): string {
   const [elapsed, setElapsed] = useState(0);
   const busyRef = useRef(busy);
   busyRef.current = busy;
@@ -36,7 +39,10 @@ function useElapsed(busy: boolean): number {
     const id = setInterval(() => setElapsed(Math.round((Date.now() - start) / 1000)), 1000);
     return () => clearInterval(id);
   }, [busy]);
-  return elapsed;
+  if (elapsed < 60) return `${elapsed}s`;
+  const m = Math.floor(elapsed / 60);
+  const s = elapsed % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 /** Shorten a workspace path to its basename when it is long. */
@@ -44,8 +50,15 @@ function shortPath(p: string): string {
   return p.length > 40 ? basename(p) : p;
 }
 
-/** Bottom status bar: model/provider · directory · mode · tokens and cost · context usage */
-export function StatusBar({ state, scrollHint }: { state: TUIState; scrollHint?: string | null }) {
+/** Bottom status bar: model/provider · directory · mode · tokens and cost · context usage
+ *
+ *  Improvements:
+ *  - Shows turn count when > 0
+ *  - Better formatting of elapsed time (m:ss for long runs)
+ *  - Context bar uses filled proportion more accurately
+ *  - Scroll hint is more visible with bold styling
+ */
+export function StatusBar({ state, scrollHint, width }: { state: TUIState; scrollHint?: string | null; width?: number }) {
   const u = state.usage;
   const cost = u.costUsd < 0.01 ? `${u.costUsd.toFixed(4)}` : `${u.costUsd.toFixed(2)}`;
   const cacheHit = u.cacheReadTokens + u.promptCacheHitTokens;
@@ -58,22 +71,28 @@ export function StatusBar({ state, scrollHint }: { state: TUIState; scrollHint?:
   const elapsed = useElapsed(state.busy);
   const badge = MODE_BADGE[state.permissionMode];
   const runningSubs = state.subagents.filter((s) => s.status === 'running').length;
+  // Long free-text fields (workspace path, stop reason) are clipped by display width so
+  // the status bar never wraps on narrow terminals; `width` comes from the host TUI.
+  const cwd = clipLine(shortPath(state.workspace), Math.max(16, (width ?? 80) - 30));
+  const stopReason = clipLine(state.lastStopReason ?? '', Math.max(12, (width ?? 80) - 40));
+  // Turn count badge (shown after the first turn completes)
+  const turnBadge = state.turnCount > 0 ? `#${state.turnCount}` : '';
 
   return (
-    <Box borderStyle="round" borderColor={over ? 'yellow' : 'gray'} paddingX={1} flexDirection="column" flexShrink={0}>
+    <Box borderStyle="round" borderColor={over ? theme.warning : theme.muted} paddingX={1} flexDirection="column" flexShrink={0}>
       <Box gap={2}>
         <Text color={theme.primary} bold>
-          {state.model}
+          {state.model}{turnBadge && <Text color={theme.muted} bold={false}>{turnBadge}</Text>}
         </Text>
         <Text color={theme.muted}>
-          {state.provider} · {shortPath(state.workspace)}
+          {state.provider} · {cwd}
         </Text>
         <Text color={badge.color} bold>
           [{badge.label}]
         </Text>
         {state.busy ? (
           <Text color={theme.warning}>
-            {spinner} Running{elapsed > 0 ? ` ${elapsed}s` : ''}
+            {spinner} Running{elapsed ? ` ${elapsed}` : ''}
           </Text>
         ) : null}
         {state.currentTool ? (
@@ -96,7 +115,7 @@ export function StatusBar({ state, scrollHint }: { state: TUIState; scrollHint?:
         <Text color={over ? theme.error : theme.muted}>
           ctx {contextBar(state.contextRatio)} {pct}%
         </Text>
-        <Text color={theme.muted}>{state.lastStopReason ?? ''}</Text>
+        <Text color={theme.muted}>{stopReason}</Text>
         {scrollHint ? <Text color={theme.warning} bold>{scrollHint}</Text> : null}
       </Box>
     </Box>

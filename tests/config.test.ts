@@ -115,10 +115,23 @@ describe('loadConfig', () => {
 describe('mergeConfig / modelMetaFor / pricingFor', () => {
   it('mergeConfig deep-merges key sections', () => {
     const base = defaultConfig();
-    const merged = mergeConfig(base, { context: { maxTokens: 200_000, compactAt: 0.8, autoCompact: true, keepRecentTurns: 3, maxSummaryTokens: 5000 } });
+    const merged = mergeConfig(base, { context: { maxTokens: 200_000, compactAt: 0.8, compactEveryTurns: 30, autoCompact: true, keepRecentTurns: 3, maxSummaryTokens: 5000 } });
     expect(merged.context.maxTokens).toBe(200_000);
     expect(merged.context.keepRecentTurns).toBe(3);
+    expect(merged.context.compactEveryTurns).toBe(30);
     expect(merged.permissions.mode).toBe('ask'); // untouched sections keep defaults
+  });
+
+  it('new turn-budget defaults: compactEveryTurns=20, maxTotalTurns=100, subagents.maxTurns=50', () => {
+    const cfg = defaultConfig();
+    expect(cfg.context.compactEveryTurns).toBe(20);
+    expect(cfg.agent.maxTurns).toBe(25);
+    expect(cfg.agent.maxTotalTurns).toBe(100);
+    expect(cfg.subagents.maxTurns).toBe(50);
+    // merge keeps the new fields too
+    const merged = mergeConfig(cfg, { agent: { maxTurns: 10, maxTotalTurns: 200, maxParallelTools: 2, toolTimeoutMs: 1000 } });
+    expect(merged.agent.maxTotalTurns).toBe(200);
+    expect(merged.agent.maxParallelTools).toBe(2);
   });
 
   it('modelMetaFor built-in metadata + user overrides', () => {

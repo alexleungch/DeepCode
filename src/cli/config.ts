@@ -39,6 +39,7 @@ export function configCommand(): Command {
           grok: 'grok-4',
           qwen: 'qwen3.8-max',
           ollama: 'qwen3:32b',
+          openrouter: 'openrouter/auto',
         },
         providers: {
           deepseek: { apiKey: 'env:DEEPSEEK_API_KEY', baseUrl: 'https://api.deepseek.com' },
@@ -47,6 +48,7 @@ export function configCommand(): Command {
           grok: { apiKey: 'env:XAI_API_KEY', baseUrl: 'https://api.x.ai/v1' },
           qwen: { apiKey: 'env:DASHSCOPE_API_KEY', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
           ollama: { baseUrl: 'http://localhost:11434' },
+          openrouter: { apiKey: 'env:OPENROUTER_API_KEY', baseUrl: 'https://openrouter.ai/api/v1' },
         },
         permissions: { mode: 'ask', allow: [], deny: [], additionalDirectories: [] },
       };

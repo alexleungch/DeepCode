@@ -62,9 +62,17 @@ export async function runSubagent(deps: SubagentDeps, opts: { task: string; labe
     ].join('\n');
 
     let errorMsg = '';
+    // Sub-agents get their OWN turn budget (config.subagents.maxTurns), decoupled from the main
+    // agent's agent.maxTurns — strategy 3: delegation must not consume the parent's counter, and a
+    // sub-agent that needs many tool steps (tracing, grep loops, builds) is allowed to run long
+    // before it wraps up with a report.
+    const subConfig = {
+      ...deps.config,
+      agent: { ...deps.config.agent, maxTurns: deps.config.subagents.maxTurns },
+    };
     const result = await runAgentTurn(
       {
-        config: deps.config,
+        config: subConfig,
         provider: deps.provider,
         modelMeta: deps.provider.modelMeta,
         registry: deps.registry,
@@ -74,6 +82,7 @@ export async function runSubagent(deps: SubagentDeps, opts: { task: string; labe
         session: session as never,
         sessionStore: noopSessionStore as never,
         todoStore: noopTodoStore as never,
+        workspace: deps.workspace,
         emit: (e) => {
           // forward sub-agent approvals and errors; text/tool details do not pollute the main UI
           if (e.type === 'approval-request') deps.emit(e);

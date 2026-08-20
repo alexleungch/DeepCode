@@ -55,8 +55,13 @@ export function estimateMessageRows(m: MessageView, width: number, opts: RowEsti
     rows = wrappedRows(`❯ ${m.text}`, contentWidth);
   } else if (m.role === 'assistant') {
     rows = buildMarkdownLines(m).reduce((acc, l) => acc + wrappedRows(l.text, contentWidth), 0);
-    // ThinkingLine renders while streaming (thinking, no text yet) or when expanded.
-    const thinkingShown = (m.streaming && !!m.thinking && !m.text) || opts.expandedThinkingId === m.id;
+    // ThinkingLine renders while streaming (thinking, no text yet), when expanded, or when the
+    // turn settled with thinking-only content (no text, no tool calls) — that thinking is the
+    // answer and occupies one row.
+    const thinkingShown =
+      (m.streaming && !!m.thinking && !m.text) ||
+      opts.expandedThinkingId === m.id ||
+      (!m.text && !!m.thinking && m.toolCalls.length === 0);
     if (thinkingShown) rows += 1;
     for (const tc of m.toolCalls) rows += toolCardRows(tc, width, opts.expandedCallId === tc.callId);
   } else {

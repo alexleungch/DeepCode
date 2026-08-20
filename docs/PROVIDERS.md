@@ -10,6 +10,7 @@
 | Grok (xAI) | `https://api.x.ai/v1` | ✅ | Server-side automatic (best effort) | ✅ | ✅ |
 | Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | ✅ | Automatic context caching | `qwen-vl-*` ✅ | `qwen3.8-max` ✅ |
 | Ollama | `http://localhost:11434` | Per model (automatic downgrade) | In-session KV reuse | Vision models ✅ | — |
+| OpenRouter | `https://openrouter.ai/api/v1` | ✅ (per routed model) | Automatic (best effort) | Per model config | `deepseek/deepseek-r1` ✅ (JSON protocol) |
 | openai-compat | Any | ✅ | Best effort | Per model config | — |
 
 ## API Keys
@@ -20,10 +21,27 @@ set ANTHROPIC_API_KEY=sk-ant-... # Anthropic
 set GOOGLE_API_KEY=...           # Gemini
 set XAI_API_KEY=...              # Grok
 set DASHSCOPE_API_KEY=sk-...     # Qwen (Alibaba Cloud Model Studio / DashScope)
+set OPENROUTER_API_KEY=sk-or-... # OpenRouter (any model, vendor-prefixed ids)
 set DEEPCODE_API_KEY=...         # generic compatible endpoint
 ```
 
 The config file can reference environment variables with `"apiKey": "env:DEEPSEEK_API_KEY"` to avoid plaintext keys.
+
+## OpenRouter
+
+OpenRouter is a gateway over many model vendors and speaks the OpenAI-compatible API, so it reuses
+the `openai-compat` adapter:
+
+```bash
+set OPENROUTER_API_KEY=sk-or-...
+deepcode --provider openrouter --model anthropic/claude-sonnet-4-5
+# or in the TUI:  /models openrouter anthropic/claude-sonnet-4-5
+```
+
+- Model ids are vendor-prefixed (`anthropic/…`, `deepseek/…`, `qwen/…`, `meta-llama/…`, …); `openrouter/auto` routes automatically.
+- Built-in capability metadata covers common ids (`anthropic/claude-sonnet-4-5`, `deepseek/deepseek-chat-v3-0324`, `deepseek/deepseek-r1`, `qwen/qwen3-coder-plus`, `meta-llama/llama-3.3-70b-instruct`); any other id falls back to safe defaults and can be tuned via `config.modelMeta`.
+- Thinking tokens surface via the `reasoning` field (DeepSeek-style `reasoning_content` is also forwarded).
+- Caching is best effort; set `cacheControl` per model in `config.modelMeta` to opt out.
 
 ## Model capability metadata
 

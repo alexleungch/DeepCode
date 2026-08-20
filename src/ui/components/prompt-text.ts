@@ -50,6 +50,7 @@ export type EditorAction =
   | { type: 'historyUp' }
   | { type: 'historyDown' }
   | { type: 'tabComplete' }
+  | { type: 'completeAt'; value: string }
   | { type: 'submit'; text: string }
   | { type: 'reset' };
 
@@ -140,6 +141,17 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       const next = matches[(matches.indexOf(current) + 1) % matches.length];
       if (next === undefined) return state;
       return withText(state, '/' + next, next.length + 1);
+    }
+
+    case 'completeAt': {
+      // Replace the `@path` token under/after the cursor with the completed value
+      // (candidates are computed by the component — filesystem access stays out of
+      // this pure reducer).
+      const span = atSpanAtCursor(state.value, state.cursor);
+      if (!span) return state;
+      const chars = [...state.value];
+      const value = chars.slice(0, span.start).join('') + action.value + chars.slice(span.end).join('');
+      return withText(state, value, span.start + [...action.value].length);
     }
 
     case 'submit': {
@@ -329,4 +341,103 @@ export function commandMatches(value: string): string[] {
   const m = /^\/([a-zA-Z][a-zA-Z0-9-]*)?$/.exec(value);
   if (!m) return [];
   return SLASH_COMMANDS.filter((c) => c.startsWith(m[1]?.toLowerCase() ?? ''));
+}
+
+/* ---------------------------------------------------------------------------
+ * `@file` reference tokens (mirrors the expansion rules in src/agent/at-refs.ts)
+ * ------------------------------------------------------------------------- */
+
+/** Characters that may start an @-ref (word boundary: start, whitespace, or one of `( [ { ,`). */
+const AT_BOUNDARY = /[\s(\[{,]/;
+/** Characters allowed INSIDE an @-ref path (excludes quotes/brackets/punctuation). */
+const AT_PATH_CHAR = /[^\s"'`$()\[\]{},;!?]/;
+
+export interface AtToken {
+  /** Absolute char index where the `@` starts */
+  start: number;
+  /** Absolute char index one past the last path char (exclusive) */
+  end: number;
+}
+
+/**
+ * All `@ref` spans in `value` (absolute code-point offsets into `[...value]`), using
+ * the same tokenization as expandAtRefs: `@` at a word boundary followed by 1+ path
+ * chars. A trailing bare `@` produces no token (the completion path handles it).
+ */
+export function atTokens(value: string): AtToken[] {
+  const chars = [...value];
+  const tokens: AtToken[] = [];
+  let i = 0;
+  while (i < chars.length) {
+    const ch = chars[i]!;
+    if (ch === '@' && (i === 0 || AT_BOUNDARY.test(chars[i - 1]!))) {
+      let j = i + 1;
+      while (j < chars.length && AT_PATH_CHAR.test(chars[j]!)) j++;
+      if (j > i + 1) tokens.push({ start: i, end: j });
+      i = Math.max(j, i + 1);
+      continue;
+    }
+    i++;
+  }
+  return tokens;
+}
+
+export interface AtSpan {
+  start: number;
+  end: number;
+  /** The path part after `@`, exactly as typed ("" for a bare trailing `@`) */
+  partial: string;
+}
+
+/**
+ * The `@path` token under (or immediately before/at) the cursor — the one Tab should
+ * complete. Returns null when the cursor is not on a ref.
+ */
+export function atSpanAtCursor(value: string, cursor: number): AtSpan | null {
+  const chars = [...value];
+  const at = atTokens(value).find((t) => cursor >= t.start && cursor <= t.end);
+  if (at) return { start: at.start, end: at.end, partial: chars.slice(at.start + 1, at.end).join('') };
+  // Bare trailing `@` at a word boundary: Tab should offer the top-level listing.
+  if (cursor > 0 && chars[cursor - 1] === '@' && (cursor === 1 || AT_BOUNDARY.test(chars[cursor - 2]!))) {
+    return { start: cursor - 1, end: cursor, partial: '' };
+  }
+  return null;
+}
+
+export interface InputSegment {
+  text: string;
+  /** True when this segment is part of an @-ref (rendered highlighted) */
+  isRef: boolean;
+}
+
+/**
+ * Split a wrapped row (or any char slice at a known absolute base offset) into
+ * highlight segments so the renderer can color `@refs` while keeping cursor math
+ * untouched (rows stay plain char arrays).
+ */
+export function segmentChars(chars: string[], base: number, tokens: AtToken[]): InputSegment[] {
+  const segs: InputSegment[] = [];
+  let cur = '';
+  let curRef = false;
+  const flush = () => {
+    if (cur) {
+      segs.push({ text: cur, isRef: curRef });
+      cur = '';
+    }
+  };
+  for (let i = 0; i < chars.length; i++) {
+    const ref = tokens.some((t) => base + i >= t.start && base + i < t.end);
+    if (ref !== curRef) {
+      flush();
+      curRef = ref;
+    }
+    cur += chars[i];
+  }
+  flush();
+  return segs;
+}
+
+/** Segment a wrapped row (chars + its absolute start offset). */
+export function segmentRow(row: WrappedRow, tokens: AtToken[]): InputSegment[] {
+  return segmentChars(row.chars, row.startCursor, tokens);
 }

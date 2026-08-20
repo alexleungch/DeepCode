@@ -83,7 +83,10 @@ export class PermissionGate {
   private denyRules: { tool?: string; pattern?: RegExp }[];
   private alwaysAllow: Set<string>;
   private alwaysDeny: Set<string>;
+  /** Tool name per callId; only needed until `remember()` consumes it (or the cap evicts it). */
   private toolByCallId = new Map<string, string>();
+  /** Upper bound for toolByCallId: auto-approved calls never reach remember(), so keep it small. */
+  private static readonly MAX_TRACKED_CALLS = 2_000;
 
   constructor(
     private config: DeepcodeConfig,
@@ -145,6 +148,12 @@ export class PermissionGate {
    */
   check(item: ApprovalItem): ApprovalDecision | undefined {
     const { toolName } = item;
+    // Bound the tracker: most calls are auto-approved and never remembered, so an unbounded map
+    // would grow for the whole session. Evict the oldest entries (Map preserves insertion order).
+    if (this.toolByCallId.size >= PermissionGate.MAX_TRACKED_CALLS) {
+      const oldest = this.toolByCallId.keys().next().value;
+      if (oldest !== undefined) this.toolByCallId.delete(oldest);
+    }
     this.toolByCallId.set(item.callId, toolName);
 
     // Hard denylist (always deny, unless the user explicitly allowed the same rule and the pattern is in allow)
@@ -198,6 +207,9 @@ export class PermissionGate {
   /** Record a session-level decision ("always allow/deny"). */
   remember(decision: ApprovalDecision): void {
     const tool = decision.toolName ?? this.toolByCallId.get(decision.callId);
+    // The callId->tool mapping is single-use: drop it so the tracker does not retain every
+    // approved call for the rest of the session.
+    this.toolByCallId.delete(decision.callId);
     if (!tool) return;
     if (decision.action === 'allow-always') this.alwaysAllow.add(tool);
     if (decision.action === 'deny-always') this.alwaysDeny.add(tool);

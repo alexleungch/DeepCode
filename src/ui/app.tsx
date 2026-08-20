@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -58,6 +58,12 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   const [scrollOffset, setScrollOffset] = useState(0);
   const [atBottom, setAtBottom] = useState(true);
   const scrollOffsetRef = useRef(0);
+  // Latest message list for the (memoized, stable) onSubmit handler. The reducer reuses message
+  // object identities, so reading through the ref at submit time is equivalent to a fresh render
+  // closure — but it keeps onSubmit's identity STABLE across streamed frames, which is what lets
+  // the memoized PromptInput skip re-rendering while the agent streams.
+  const messagesRef = useRef(state.messages);
+  messagesRef.current = state.messages;
   const SCROLL_STEP = 8;
   const WHEEL_STEP = 3;
   const { stdout } = useStdout();
@@ -93,7 +99,22 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   // and the bordered StatusBar (~4 rows) — a ~9-row fixed overhead. The box still scrolls
   // internally past this cap; on submit it collapses back to a single line via setBoth('', 0).
   const fixedOverhead = 9;
-  const mainAreaRows = Math.max(3, rows - fixedOverhead);
+  // Pinned overlay height estimate: the todo panel, transient notices, and the approval dialog
+  // are rendered BELOW the scroll viewport (above the input) and consume REAL terminal rows.
+  // The message window and the last-message cap must budget for them, otherwise the newest
+  // content overflows out the TOP of the viewport (flex-end anchoring) and the head of a long
+  // final answer disappears while the agent's todo panel is still pinned — the user sees a todo
+  // checklist followed by nothing, and can't tell the answer (or the task) ever finished.
+  // Todo panel: 2 borders + 1 title + up to 8 visible items + 1 margin (+1 "+N more" line).
+  const todoPanelRows = state.todos.length > 0 ? Math.min(state.todos.length, 8) + (state.todos.length > 8 ? 5 : 4) : 0;
+  // Transient notices: up to 5 shown, each a text row plus its margin row.
+  const noticeRows = Math.min(state.notices.length, 5) * 2;
+  // Approval dialog: rough estimate (frame + one row per pending item); the turn is paused while
+  // it is open, so exactness here only affects how much history stays in the window.
+  const approvalRows =
+    state.approvals.some((a) => !a.resolved) ? Math.min(12, Math.max(6, state.approvals.filter((a) => !a.resolved).length * 3)) : 0;
+  const overlayRows = todoPanelRows + noticeRows + approvalRows;
+  const mainAreaRows = Math.max(3, rows - fixedOverhead - overlayRows);
   const inputMaxLines = Math.max(2, Math.floor((mainAreaRows * 2) / 3));
 
   // Mouse tracking (wheel scroll) is enabled for the whole TUI session in cli.ts runTUI
@@ -101,16 +122,20 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   // useInput handler below as `[<64;…M` (up) / `[<65;…M` (down) and scroll the main viewport.
 
   // Keep the view pinned to the newest message while `atBottom` is true. Recompute the bottom start
-  // whenever the conversation grows, or a tool card expands/collapses while at the bottom.
+  // whenever the conversation grows — in LENGTH (a new turn) OR in CONTENT SIZE (a thinking-only
+  // message that later fills in its final answer text changes height without changing the count),
+  // or a tool card expands/collapses while at the bottom.
+  const pinOpts = { expandedCallId: expandedTool, expandedThinkingId: expandedThinkingId };
+  // Total estimated rows of the whole conversation. Computed ONCE per render and reused by the
+  // pin effect, the scroll-hint percent, and the viewport guards (the old code called
+  // estimateTotalRows twice per render; the markdown line cache in MessageList makes this cheap).
+  const totalRows = estimateTotalRows(state.messages, width, pinOpts);
   useEffect(() => {
     if (!atBottom) return;
-    const bs = bottomStart(state.messages, width, mainAreaRows, {
-      expandedCallId: expandedTool,
-      expandedThinkingId: expandedThinkingId,
-    });
+    const bs = bottomStart(state.messages, width, mainAreaRows, pinOpts);
     scrollOffsetRef.current = bs;
     setScrollOffset(bs);
-  }, [atBottom, state.messages.length, width, mainAreaRows, expandedTool, expandedThinkingId]);
+  }, [atBottom, totalRows, state.messages.length, width, mainAreaRows, expandedTool, expandedThinkingId]);
 
   // Keep the mirror ref in sync with the scroll offset even when it is changed outside the main
   // input handler (e.g. the /clear command resets it via setState).
@@ -263,7 +288,7 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
     if (key.tab && key.shift) {
       const nm = nextMode(state.permissionMode);
       switchMode(engine, nm, setState);
-      pushNotice(setState, `Mode → ${MODE_LABEL[nm]} (${nm}). Shift+Tab 再次切换。`, 'info', 'mode');
+      pushNotice(setState, `Mode → ${MODE_LABEL[nm]} (${nm}). Press Shift+Tab to switch again.`, 'info', 'mode');
       return;
     }
     // In-app history scroll (replaces the native terminal scrollback we dropped for the pinned
@@ -286,12 +311,15 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
       scrollBy(SCROLL_STEP);
       return;
     }
-    // Home / End (with Ctrl as a best-effort alias) jump to the very top / bottom of the history.
-    if (key.home || (key.ctrl && key.home)) {
+    // Ctrl+Home / Ctrl+End jump to the very top / bottom of the history. PLAIN Home/End are
+    // deliberately NOT handled here — they belong to the input box's cursor movement
+    // (PromptInput). Ink fires every useInput handler, so binding plain Home/End in both
+    // places used to scroll history AND move the cursor at the same time.
+    if (key.ctrl && key.home) {
       scrollBy(-1e9);
       return;
     }
-    if (key.end || (key.ctrl && key.end)) {
+    if (key.ctrl && key.end) {
       scrollBy(1e9);
       return;
     }
@@ -330,64 +358,85 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
     if (!activeApproval) engine.interrupt();
   });
 
-  const onSubmit = (text: string) => {
-    // Help and /models notices are transient: any new submission supersedes them so they never
-    // crowd the live region. This mirrors /help — the previous hint (the /models list, the
-    // "Switched to …" banner, or an API-key prompt) is replaced by your input and scrolls away.
-    setState((s) =>
-      s.notices.some((n) => n.group === 'help' || n.group === 'models')
-        ? { ...s, notices: s.notices.filter((n) => n.group !== 'help' && n.group !== 'models') }
-        : s,
-    );
-    // Stage 1: a model name is being requested — the next submitted line is the model name
-    if (pendingModel) {
-      const pid = pendingModel;
-      setPendingModel(null);
-      const model = text.trim() || (engine.config.models[pid] ?? 'unknown-model');
-      if (pid !== 'ollama' && !engine.config.providers[pid]?.apiKey) {
-        setPendingKey({ pid, model });
-        pushNotice(setState, `${model} — no API key. Enter the API key for ${providerLabel(pid)} (verified against the API before saving), or press ESC to cancel:`, 'info', 'models');
-        return;
-      }
-      switchToProvider(engine, pid, model, setState);
-      return;
-    }
-    // Stage 2: an API key is being requested — the next submitted line is the key
-    if (pendingKey) {
-      const { pid, model } = pendingKey;
-      const key = text.trim();
-      if (!key) {
-        setPendingKey(null);
-        pushNotice(setState, 'API key entry cancelled.', 'info', 'models');
-        return;
-      }
-      pushNotice(setState, `Testing API key for ${providerLabel(pid)}…`, 'info', 'models');
-      void (async () => {
-        try {
-          await engine.testApiKey(key, pid);
-        } catch (e) {
-          pushNotice(setState, `API key test failed for ${providerLabel(pid)}: ${e instanceof Error ? e.message : String(e)} — key not saved. Try again or press ESC to cancel.`, 'error', 'models');
-          return; // stay in key-entry mode so the user can retry
-        }
-        try {
-          engine.setApiKey(key, pid);
-        } catch (e) {
-          pushNotice(setState, `Failed to save API key: ${e instanceof Error ? e.message : String(e)}`, 'error', 'models');
+  // Stable submit handler for the memoized PromptInput. Reads the LATEST message list through
+  // messagesRef (a ref mirror updated each render) instead of the render closure, so its identity
+  // only changes when the inputs it truly depends on (pendingModel/pendingKey/engine) change —
+  // otherwise the memoized input would re-render on every streamed frame.
+  const onSubmit = useCallback(
+    (text: string) => {
+      // Help and /models notices are transient: any new submission supersedes them so they never
+      // crowd the live region. This mirrors /help — the previous hint (the /models list, the
+      // "Switched to …" banner, or an API-key prompt) is replaced by your input and scrolls away.
+      setState((s) =>
+        s.notices.some((n) => n.group === 'help' || n.group === 'models')
+          ? { ...s, notices: s.notices.filter((n) => n.group !== 'help' && n.group !== 'models') }
+          : s,
+      );
+      // Stage 1: a model name is being requested — the next submitted line is the model name
+      if (pendingModel) {
+        const pid = pendingModel;
+        setPendingModel(null);
+        const model = text.trim() || (engine.config.models[pid] ?? 'unknown-model');
+        if (pid !== 'ollama' && !engine.config.providers[pid]?.apiKey) {
+          setPendingKey({ pid, model });
+          pushNotice(setState, `${model} — no API key. Enter the API key for ${providerLabel(pid)} (verified against the API before saving), or press ESC to cancel:`, 'info', 'models');
           return;
         }
-        setPendingKey(null);
-        pushNotice(setState, `API key for ${providerLabel(pid)} verified and saved (…${key.slice(-4)}). Persisted to ~/.deepcode/config.json.`, 'info', 'models');
         switchToProvider(engine, pid, model, setState);
-      })();
-      return;
-    }
-    if (text.startsWith('/')) {
-      handleSlash(text, engine, onExit, setShowCost, setShowContext, setState, setPendingModel, setPendingKey, setScrollOffset, setAtBottom, state.messages);
-      return;
-    }
-    // User messages are added uniformly via the message event emitted at the start of runAgentTurn
-    void engine.runTurn(text);
-  };
+        return;
+      }
+      // Stage 2: an API key is being requested — the next submitted line is the key
+      if (pendingKey) {
+        const { pid, model } = pendingKey;
+        const key = text.trim();
+        if (!key) {
+          setPendingKey(null);
+          pushNotice(setState, 'API key entry cancelled.', 'info', 'models');
+          return;
+        }
+        pushNotice(setState, `Testing API key for ${providerLabel(pid)}…`, 'info', 'models');
+        void (async () => {
+          try {
+            await engine.testApiKey(key, pid);
+          } catch (e) {
+            pushNotice(setState, `API key test failed for ${providerLabel(pid)}: ${e instanceof Error ? e.message : String(e)} — key not saved. Try again or press ESC to cancel.`, 'error', 'models');
+            return; // stay in key-entry mode so the user can retry
+          }
+          try {
+            engine.setApiKey(key, pid);
+          } catch (e) {
+            pushNotice(setState, `Failed to save API key: ${e instanceof Error ? e.message : String(e)}`, 'error', 'models');
+            return;
+          }
+          setPendingKey(null);
+          pushNotice(setState, `API key for ${providerLabel(pid)} verified and saved (…${key.slice(-4)}). Persisted to ~/.deepcode/config.json.`, 'info', 'models');
+          switchToProvider(engine, pid, model, setState);
+        })();
+        return;
+      }
+      if (text.startsWith('/')) {
+        handleSlash(text, engine, onExit, setShowCost, setShowContext, setState, setPendingModel, setPendingKey, setScrollOffset, setAtBottom, messagesRef.current);
+        return;
+      }
+      // Re-pin the viewport to the newest content when the user submits a new message. Without this,
+      // reading history (PageUp) then sending a follow-up leaves the new result BELOW the fold —
+      // the view stays at the old scroll position and the user has to scroll down to see it.
+      setAtBottom(true);
+      // User messages are added uniformly via the message event emitted at the start of runAgentTurn
+      void engine.runTurn(text);
+    },
+    [engine, onExit, pendingModel, pendingKey, setState, setShowCost, setShowContext, setPendingModel, setPendingKey, setScrollOffset, setAtBottom],
+  );
+
+  // Stable @-completion hint handler for the memoized PromptInput (pushNotice is module-level).
+  const onAtMatches = useCallback(
+    (matches: string[]) => {
+      const shown = matches.slice(0, 8).join('  ');
+      const more = matches.length > 8 ? `  … +${matches.length - 8} more` : '';
+      pushNotice(setState, `@ matches: ${shown}${more}  (Tab cycles)`, 'info', 'at');
+    },
+    [setState],
+  );
 
   const busy = state.busy || (approval !== null);
 
@@ -397,16 +446,48 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   // headless/test environments (no rows) keep the full list with no scrollbar.
   const win =
     fixedHeight !== undefined
-      ? messageIndexWindow(state.messages, width, scrollOffset, mainAreaRows, {
-          expandedCallId: expandedTool,
-          expandedThinkingId: expandedThinkingId,
-        })
+      ? messageIndexWindow(
+          state.messages,
+          width,
+          // When pinned to the bottom, derive the window from the true bottom start instead of the
+          // (possibly stale) scrollOffset. Without this, a frame between a new message arriving and
+          // the re-pin effect running can show a non-bottom window and flash the "Back to bottom"
+          // hint right after the user submits (visible under load when the batcher splits events).
+          atBottom ? bottomStart(state.messages, width, mainAreaRows, { expandedCallId: expandedTool, expandedThinkingId: expandedThinkingId }) : scrollOffset,
+          mainAreaRows,
+          {
+            expandedCallId: expandedTool,
+            expandedThinkingId: expandedThinkingId,
+          },
+        )
       : null;
   const renderMessages = win ? state.messages.slice(win.start, win.end) : state.messages;
-  const atBottomRender = win ? win.atBottom : true;
+  // The view is only "at the bottom" when BOTH the user hasn't scrolled away (`atBottom` state,
+  // set false by PageUp/Shift+↑/wheel-up) AND the window actually reaches the newest message.
+  // Previously `win.atBottom` alone decided this: for a conversation that fits the (overscanned)
+  // render window but not the strict viewport, `win.atBottom` stays true even after PageUp, so
+  // the view stayed bottom-anchored, no "Back to bottom" hint appeared, and PageUp was a silent
+  // no-op that could never reveal the tail of the newest message.
+  const atBottomRender = win ? atBottom && win.atBottom : true;
+  // Viewport overflow guard: when pinned to the bottom and the NEWEST rendered message alone is
+  // taller than the viewport, cap how many of its markdown lines we render so the whole message
+  // head stays visible. Without this, Ink's flex container clips the overflow from the TOP
+  // (flex-end) or BOTTOM depending on justification — either way the start of a long answer that
+  // arrived after a thinking phase can be hidden, which forces the user to scroll to find it.
+  // (This is the "thinking finished but the result needs scrolling" regression.)
+  const lastRendered = renderMessages[renderMessages.length - 1];
+  const lastIsTall = lastRendered ? estimateMessageRows(lastRendered, width, { expandedCallId: expandedTool, expandedThinkingId: expandedThinkingId }) > mainAreaRows : false;
+  // Reserve the REAL estimated rows of every message ABOVE the last one (each includes its own
+  // margin), then give the remaining budget to the last message's content. The old guard only
+  // reserved 1 row for "other messages" — a 2-row user message (text + margin) then overflowed
+  // the viewport and the flex-end anchoring clipped the ANSWER'S FIRST LINE out of view.
+  const aboveRows = renderMessages.length > 1 ? renderMessages.slice(0, -1).reduce((acc, m) => acc + estimateMessageRows(m, width, { expandedCallId: expandedTool, expandedThinkingId: expandedThinkingId }), 0) : 0;
+  const maxLines = atBottomRender && lastIsTall ? Math.max(1, mainAreaRows - aboveRows - 1) : undefined;
+  // Ink measures each markdown line slightly taller than 1 row when the message Box has a
+  // marginBottom; subtract one more so the FIRST line of the answer is never pushed out.
+  const contentMaxLines = maxLines !== undefined ? Math.max(1, maxLines - 1) : undefined;
   // Total estimated rows (only meaningful with a real terminal height) — used to derive the floating
-  // position hint that REPLACES the old visual scrollbar.
-  const totalRows = fixedHeight !== undefined ? estimateTotalRows(state.messages, width, { expandedCallId: expandedTool, expandedThinkingId: expandedThinkingId }) : 0;
+  // position hint that REPLACES the old visual scrollbar. Computed once above (totalRows) and reused.
   let firstVisibleRow = 0;
   if (win) {
     for (let i = 0; i < win.start; i++) {
@@ -418,7 +499,7 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
   // quick "jump to bottom" affordance. Null when pinned to the bottom (nothing to report).
   const scrollHint =
     win && !atBottomRender && totalRows > mainAreaRows
-      ? `↓ 回到底部 (End) · 上方 ${scrollOffset} 条 · ${Math.min(100, Math.max(0, Math.round((firstVisibleRow / Math.max(1, totalRows - mainAreaRows)) * 100)))}%`
+      ? `↓ Back to bottom (End) · ${scrollOffset} msgs above · ${Math.min(100, Math.max(0, Math.round((firstVisibleRow / Math.max(1, totalRows - mainAreaRows)) * 100)))}%`
       : null;
 
   return (
@@ -429,13 +510,14 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
       <Header state={state} width={width} />
       <Box flexGrow={1} flexDirection="row" overflow="hidden" paddingX={1}>
         <Box flexGrow={1} flexDirection="column" justifyContent={atBottomRender ? 'flex-end' : 'flex-start'} overflow="hidden">
-          {renderMessages.map((m) => (
+          {renderMessages.map((m, mi) => (
             <MessageItem
               key={m.id}
               m={m}
               width={width}
               expandedCallId={expandedTool ?? undefined}
               expandedThinkingId={expandedThinkingId ?? undefined}
+              maxLines={mi === renderMessages.length - 1 ? contentMaxLines : undefined}
             />
           ))}
         </Box>
@@ -502,6 +584,8 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
           disabled={busy}
           width={width}
           maxLines={inputMaxLines}
+          cwd={engine.workspace}
+          onAtMatches={onAtMatches}
           onSubmit={onSubmit}
           placeholder={
             pendingModel
@@ -510,11 +594,11 @@ export function DeepcodeTUI({ engine, onExit }: { engine: DeepcodeEngine; onExit
                 ? `Enter API key for ${providerLabel(pendingKey.pid)}…`
                 : busy
                   ? 'Running… (ESC to interrupt)'
-                  : 'Type a message… (/help)'
+                  : 'Type a message… (/help for shortcuts)'
           }
         />
       </Box>
-      <StatusBar state={state} scrollHint={scrollHint} />
+      <StatusBar state={state} scrollHint={scrollHint} width={width} />
     </Box>
   );
 }
@@ -763,7 +847,7 @@ function handleSlash(
       const lines = [
         'Available commands:',
         '  /help                       Show this help',
-        '  /theme [id]                 Switch the TUI theme (default, dracula, gruvbox, nord, solarized, matrix); bare /theme lists them',
+        '  /theme [id]                 Switch the TUI theme (default, dracula, gruvbox, nord, solarized, matrix, light, gruvbox-light); bare /theme lists them; auto-picks light on light terminals when unset',
         '  /key [KEY]                  Set the API key for the current provider (verified against the API before saving)',
         '  /models                     List configured models (only vendors with a working API key) + supported vendors',
         '  /models <vendor> [model]    Add/switch a vendor: prompts for the model name and, if needed, the API key (verified before saving)',
@@ -771,19 +855,41 @@ function handleSlash(
         '  /context                    Context window usage and compaction threshold',
         '  /compact                    Manually compact the conversation',
         '  /clear                      Clear the current session',
+        '  /export [path]              Save the conversation to a file',
         '  /exit, /quit                Exit the TUI',
-        '  ESC                         Interrupt the current generation',
+        '',
+        'Keybindings:',
+        '  Enter                       Submit / insert newline (Alt+Enter / Shift+Enter for newline)',
+        '  Tab                         Complete slash command, or insert the highlighted file from the @ list (Shift+Tab = cycle mode)',
+        '  ↑/↓                         Cursor between wrapped lines (multi-line) / cycle command history (single-line) / move in the @ file list',
+        '  ←/→, Home/End, Ctrl+A/E     Move the cursor',
+        '  Ctrl+U/K/W                  Delete to line start / end / word before',
+        '  Ctrl+O                      Expand the latest tool result (or collapsed thinking)',
+        '  Ctrl+C                      Interrupt the current run / exit when idle',
+        '  Ctrl+E                      Expand/collapse diff in approval dialog',
+        '  ESC                         Cancel entry / close panel / interrupt',
         '  Shift+Tab                   Cycle permission mode (AUTO → EDIT → PLAN → BYPASS)',
         '  Shift+↑/↓                  Scroll history one line (up/down)',
         '  PageUp/PageDown, wheel     Page through conversation history',
-        '  Home / End                 Jump to top / bottom of history',
-        '  /export [path]             Save the conversation to a file',
+        '  Ctrl+Home / Ctrl+End       Jump to top / bottom of history',
+        '',
+        '@file references:',
+        '  Type @ in your message to attach a file — a live file list opens automatically; ↑/↓ move the highlight, Tab inserts (globs like @src/*.ts work)',
+        '  Directories get a trailing / so you can keep descending; completing a file closes the list',
+        '',
+        'Permission modes:',
+        '  AUTO   Ask before any file edit or tool use (default)',
+        '  EDIT   Allow edits, ask before other tools',
+        '  PLAN   Read-only: show what would happen, make no changes',
+        '  BYPASS Full auto-pilot: no confirmations',
       ];
       pushNotice(setState, lines.join('\n'), 'info', 'help');
       break;
     }
     default:
-      // Unknown commands are treated as ordinary messages for the agent (added via engine events)
+      // Unknown commands are treated as ordinary messages for the agent (added via engine events).
+      // Re-pin like the regular submit path so the response is visible even if the user scrolled up.
+      setAtBottom(true);
       void engine.runTurn(text);
   }
 }

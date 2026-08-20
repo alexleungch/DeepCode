@@ -116,6 +116,54 @@ describe('TUI render smoke (ink-testing-library)', () => {
     engine.close();
   });
 
+  it('thinking -> text: result appears after a reasoning phase (thinking-delta then text-delta)', async () => {
+    const resolved = loadConfig({ workspace: ws });
+    resolved.config.providers.deepseek = { apiKey: 'k', baseUrl: 'http://fake' };
+    const engine = new DeepcodeEngine({ resolved });
+    engine.provider = scriptedProvider(() => [
+      // reasoning phase first: only thinking, no text yet
+      { type: 'thinking-delta', text: 'Let me reason about this carefully...' },
+      { type: 'thinking-delta', text: ' The answer is simple.' },
+      // final answer arrives after the thinking phase
+      { type: 'text-delta', text: 'The answer is ' },
+      { type: 'text-delta', text: '42' },
+      { type: 'done', response: { message: { role: 'assistant', content: 'The answer is 42' }, usage: { inputTokens: 10, outputTokens: 5 }, stopReason: 'end_turn' } },
+    ]) as never;
+    await engine.init();
+    const { lastFrame, unmount } = render(
+      React.createElement(DeepcodeTUI, { engine, onExit: () => undefined }),
+    );
+    await engine.runTurn('what is the answer?');
+    await new Promise((r) => setTimeout(r, 150));
+    const frame = lastFrame() ?? '';
+    // The visible result must appear after the thinking phase
+    expect(frame).toContain('The answer is 42');
+    unmount();
+    engine.close();
+  });
+
+  it('thinking-only turn: thinking IS the visible answer', async () => {
+    const resolved = loadConfig({ workspace: ws });
+    resolved.config.providers.deepseek = { apiKey: 'k', baseUrl: 'http://fake' };
+    const engine = new DeepcodeEngine({ resolved });
+    engine.provider = scriptedProvider(() => [
+      // model produced ONLY reasoning — no text, no tool calls
+      { type: 'thinking-delta', text: 'The model only reasoned here' },
+      { type: 'done', response: { message: { role: 'assistant', content: '' }, usage: { inputTokens: 10, outputTokens: 5 }, stopReason: 'end_turn' } },
+    ]) as never;
+    await engine.init();
+    const { lastFrame, unmount } = render(
+      React.createElement(DeepcodeTUI, { engine, onExit: () => undefined }),
+    );
+    await engine.runTurn('think only');
+    await new Promise((r) => setTimeout(r, 150));
+    const frame = lastFrame() ?? '';
+    // thinking-only content is rendered as the answer (state.ts turn-end / MessageList thinkingOnlyAnswer)
+    expect(frame).toContain('The model only reasoned here');
+    unmount();
+    engine.close();
+  });
+
   it('tool call card rendering', async () => {
     const resolved = loadConfig({ workspace: ws });
     resolved.config.providers.deepseek = { apiKey: 'k', baseUrl: 'http://fake' };

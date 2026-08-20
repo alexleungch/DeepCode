@@ -56,15 +56,30 @@ export class ToolInterruptedError extends Error {
 async function withTimeoutAndSignal<T>(p: Promise<T>, ms: number, signal: AbortSignal | undefined, message: string): Promise<T> {
   // No timeout configured? still race against the abort signal so interrupt-responsive tools
   // (bash kills the child) resolve promptly instead of letting the turn hang on a long run.
-  const timeout = !ms || ms <= 0 ? null : new Promise<never>((_, reject) => {
-    const t = setTimeout(() => reject(new Error(message)), ms);
-    (t as unknown as { unref?: () => void }).unref?.();
-  });
+  let timer: NodeJS.Timeout | undefined;
+  let onAbort: (() => void) | undefined;
+  const timeout = !ms || ms <= 0
+    ? null
+    : new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+        (timer as unknown as { unref?: () => void }).unref?.();
+      });
   const abort = signal && !signal.aborted
-    ? new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(new ToolInterruptedError()), { once: true }))
+    ? new Promise<never>((_, reject) => {
+        onAbort = () => reject(new ToolInterruptedError());
+        signal.addEventListener('abort', onAbort, { once: true });
+      })
     : null;
-  const race: Promise<T>[] = [p];
-  if (timeout) race.push(timeout as Promise<never>);
-  if (abort) race.push(abort as Promise<never>);
-  return Promise.race(race);
+  try {
+    const race: Promise<T>[] = [p];
+    if (timeout) race.push(timeout as Promise<never>);
+    if (abort) race.push(abort as Promise<never>);
+    return await Promise.race(race);
+  } finally {
+    // Detach the abort listener and cancel the timer when the tool settles normally —
+    // otherwise every tool call would pin a listener + closure on the (long-lived) turn
+    // signal for the rest of the session (a classic listener leak).
+    if (timer) clearTimeout(timer);
+    if (onAbort && signal) signal.removeEventListener('abort', onAbort);
+  }
 }

@@ -5,7 +5,17 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config/loader.js';
 import { DeepcodeEngine } from '../src/engine.js';
 import { theme } from '../src/ui/theme.js';
-import { applyTheme, resolveTheme, isThemeId, setActiveThemeId, currentThemeId, themeListing, THEMES } from '../src/ui/themes.js';
+import {
+  applyTheme,
+  resolveTheme,
+  isThemeId,
+  setActiveThemeId,
+  currentThemeId,
+  themeListing,
+  THEMES,
+  contrastRatio,
+  luminance,
+} from '../src/ui/themes.js';
 import type { LLMProvider, LLMRequest, LLMStreamEvent } from '../src/providers/types.js';
 
 const silentProvider = (): LLMProvider => ({
@@ -50,7 +60,7 @@ describe('theme registry (themes.ts)', () => {
   it('lists every built-in theme with an id', () => {
     const listing = themeListing();
     expect(listing.length).toBe(Object.keys(THEMES).length);
-    for (const line of listing) expect(line).toMatch(/^\s{2}\S+\s+\S+ — /);
+    for (const line of listing) expect(line).toMatch(/^\s{2}\S+\s+.+ — .+\[(light|dark)\]$/);
   });
 
   it('isThemeId / resolveTheme: known ids resolve, unknown fall back to default', () => {
@@ -66,6 +76,55 @@ describe('theme registry (themes.ts)', () => {
     const pal = applyTheme('matrix');
     expect(pal.primary).toBe('#00ff41');
     expect(currentThemeId()).toBe(before);
+  });
+});
+
+describe('light themes (readability on a white terminal background)', () => {
+  const lightThemes = Object.values(THEMES).filter((t) => t.mode === 'light');
+  const darkThemes = Object.values(THEMES).filter((t) => t.mode === 'dark');
+
+  it('ships at least two light themes and marks every theme with a mode', () => {
+    expect(isThemeId('light')).toBe(true);
+    expect(isThemeId('gruvbox-light')).toBe(true);
+    expect(lightThemes.length).toBeGreaterThanOrEqual(2);
+    for (const t of Object.values(THEMES)) expect(['light', 'dark']).toContain(t.mode);
+  });
+
+  it('themeListing exposes the background mode of each theme', () => {
+    for (const line of themeListing()) {
+      expect(line).toMatch(/\[(light|dark)\]$/);
+    }
+  });
+
+  it('light themes use dark text on the light background (WCAG AA body contrast)', () => {
+    for (const t of lightThemes) {
+      // Body/assistant text must be dark and pass 4.5:1 against white.
+      expect(luminance(t.assistant), `${t.id}: assistant dark enough`).toBeLessThan(0.5);
+      expect(contrastRatio(t.assistant, '#ffffff'), `${t.id}: assistant contrast`).toBeGreaterThanOrEqual(4.5);
+      // Code text must be dark against the light code block background too.
+      expect(contrastRatio(t.code, t.codeBg), `${t.id}: code contrast on codeBg`).toBeGreaterThanOrEqual(4.5);
+      // Semantic accents stay readable on white.
+      for (const slot of ['primary', 'success', 'error', 'warning', 'user', 'accent'] as const) {
+        expect(contrastRatio(t[slot], '#ffffff'), `${t.id}: ${slot} on white`).toBeGreaterThanOrEqual(3);
+      }
+    }
+  });
+
+  it('dark themes use bright text on near-black', () => {
+    for (const t of darkThemes) {
+      expect(luminance(t.assistant), `${t.id}: assistant bright`).toBeGreaterThan(0.6);
+      expect(contrastRatio(t.assistant, '#000000'), `${t.id}: assistant on black`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it('switches to a light theme through setActiveThemeId + applyTheme', () => {
+    setActiveThemeId('light');
+    applyTheme(currentThemeId());
+    expect(theme.mode).toBe('light');
+    expect(theme.assistant).toBe('#1f2328');
+    // restore for other tests
+    setActiveThemeId('default');
+    applyTheme(currentThemeId());
   });
 });
 

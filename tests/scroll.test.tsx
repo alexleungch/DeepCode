@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
+import { render as inkRender } from 'ink';
 import React from 'react';
+import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +13,40 @@ import { DeepcodeTUI } from '../src/ui/app.js';
 import type { LLMProvider, LLMRequest, LLMStreamEvent } from '../src/providers/types.js';
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Minimal TTY-like stdout with a real `rows` count (pinned viewport path). */
+class RowsStdout extends EventEmitter {
+  columns = 100;
+  rows = 24;
+  isTTY = true;
+  private buf = '';
+  write = (s: string) => {
+    this.buf += s;
+    return true;
+  };
+  lastFrame = () => this.buf;
+  /** Reads and CLEARS the buffer, capturing only frames written since the last read. */
+  readFrame = () => {
+    const f = this.buf;
+    this.buf = '';
+    return f;
+  };
+}
+/**
+ * Minimal TTY-like stdin that behaves like a real Readable stream. Ink (>= v5) consumes input
+ * through the 'readable' event + `read()`, NOT the legacy 'data' event — a plain EventEmitter
+ * mock silently drops every keypress, so tests must `push()` chunks like a real stream.
+ */
+class RowsStdin extends Readable {
+  isTTY = true;
+  setRawMode() {}
+  setEncoding() {}
+  ref() {}
+  unref() {}
+  resume() {}
+  pause() {}
+  _read() {}
+}
 
 /** Provider that emits a long multi-line assistant answer per request. */
 const longProvider = (): LLMProvider => {
@@ -123,6 +160,65 @@ describe('TUI message area: pinned viewport with in-app history scroll', () => {
     // history review is advertised as PageUp/PageDown (not "scrollback").
     expect(frame).toContain('PageUp');
     expect(frame).toContain('PageDown');
+    inst.unmount();
+    engine.close();
+  });
+
+  it('after scrolling up (PageUp), submitting a new message re-pins the view so the new result appears without scrolling', async () => {
+    // Real terminal height (rows=24) → pinned viewport + in-app scroll. This reproduces the
+    // regression: read history (PageUp), then send a follow-up. The submit path must re-pin to
+    // the newest content — otherwise the new result lands BELOW the fold and the user has to
+    // scroll down manually to see it.
+    const resolved = loadConfig({ workspace: ws });
+    resolved.config.providers.deepseek = { apiKey: 'k', baseUrl: 'http://fake' };
+    const engine = new DeepcodeEngine({ resolved });
+    engine.provider = longProvider() as never;
+    await engine.init();
+    const stdout = new RowsStdout();
+    const stdin = new RowsStdin();
+    const inst = inkRender(React.createElement(DeepcodeTUI, { engine, onExit: () => undefined }), {
+      stdout: stdout as never,
+      stdin: stdin as never,
+      stderr: new RowsStdout() as never,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await wait(150);
+    const clean = () => stdout.lastFrame().replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+
+    // Turn 1 (fills ~half the screen): newest Message 0 visible at the bottom.
+    await engine.runTurn('prompt 0');
+    await wait(300);
+    expect(clean()).toContain('Message 0');
+
+    // Scroll UP with PageUp (like reading history) → atBottom becomes false, the floating
+    // position hint appears in the status bar ("Back to bottom").
+    stdin.push('\x1b[5~'); // PageUp
+    await wait(200);
+    expect(clean()).toContain('Back to bottom');
+    // Drop everything written so far so later assertions only see the post-submit frame.
+    stdout.readFrame();
+
+    // Turn 2: submit a NEW user message through the REAL input path (type char-by-char + Enter,
+    // which routes through onSubmit → setAtBottom(true) → engine.runTurn). The result must be
+    // visible WITHOUT any manual scrolling. The newest reply is 16 rows tall in a 15-row viewport,
+    // so the head-guard keeps its first lines visible (the very last line can't physically fit);
+    // the point is the user sees the new result immediately, not below the fold.
+    for (const ch of 'prompt 1') {
+      stdin.push(ch);
+      await wait(8);
+    }
+    // Drop the typing frames (they still show the hint while scrolled up) so the assertions below
+    // only inspect the frames written AFTER Enter is pressed.
+    stdout.readFrame();
+    stdin.push('\r');
+    await wait(400);
+    const frame = clean();
+    expect(frame).toContain('Message 1');
+    expect(frame).toContain('line-1-0');
+    // Re-pinned to the bottom: the "Back to bottom" hint is gone.
+    expect(frame).not.toContain('Back to bottom');
+
     inst.unmount();
     engine.close();
   });

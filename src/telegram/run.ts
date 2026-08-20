@@ -1,5 +1,6 @@
 import { loadConfig, resolveEnvValue } from '../config/loader.js';
 import { DeepcodeEngine } from '../engine.js';
+import { startMemoryWatchdog } from '../monitor/memory.js';
 import type { TelegramConfig } from '../config/types.js';
 import { TelegramClient } from './client.js';
 import { StreamingBridge } from './bridge.js';
@@ -42,12 +43,17 @@ export async function runTelegram(): Promise<void> {
   const maxBubbleChars = cfg?.maxBubbleChars ?? 3500;
   const longPollTimeoutSec = cfg?.longPollTimeoutSec ?? 25;
 
+  const resolved = loadConfig({ workspace: cfg?.workspace });
   const engine = new DeepcodeEngine({
-    resolved: loadConfig({ workspace: cfg?.workspace }),
+    resolved,
     permissionMode: cfg?.permissionMode ?? 'acceptEdits',
     title: 'telegram bridge',
   });
   await engine.init();
+
+  // Daemon: sample memory into <data dir>/logs/memory.log and warn before a heap OOM abort.
+  // The bin shim additionally restarts the bridge on crash (see bin/deepcode.cjs).
+  startMemoryWatchdog({ logDir: resolved.paths.logsDir });
 
   const client = new TelegramClient(token);
   let running = true;

@@ -1,0 +1,8 @@
+{"v":1,"sessionId":"spinner-settled-fixed","provider":"deepseek","model":"deepseek-chat","workspace":"/ws","startedAt":1724150000000}
+{"seq":1,"turn":1,"ts":0.0,"event":{"type":"session-start","sessionId":"spinner-settled-fixed","provider":"deepseek","model":"deepseek-chat","workspace":"/ws","branch":null,"resumed":false}}
+{"seq":2,"turn":1,"ts":0.1,"event":{"type":"turn-start","turn":1}}
+{"seq":3,"turn":1,"ts":0.2,"event":{"type":"thinking-delta","text":"Reading the file"}}
+{"seq":4,"turn":1,"ts":0.3,"event":{"type":"tool-start","callId":"c1","name":"read_file","input":{"path":"a.ts"}}}
+{"seq":5,"turn":1,"ts":0.4,"event":{"type":"tool-result","callId":"c1","name":"read_file","result":{"content":"export const a = 1"},"durationMs":5}}
+{"seq":6,"turn":1,"ts":0.5,"event":{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"The file contains a constant."}]},"source":"assistant"}}
+{"seq":7,"turn":1,"ts":0.6,"event":{"type":"session-end","sessionId":"spinner-settled-fixed","reason":"exit"}}

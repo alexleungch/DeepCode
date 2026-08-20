@@ -16,8 +16,8 @@
   ],
   "scripts": {
     "build": "tsup",
-    "dev": "tsx src/cli.ts",
-    "start": "node dist/cli.js",
+    "dev": "NODE_OPTIONS=--max-old-space-size=12288 tsx src/cli.ts",
+    "start": "NODE_OPTIONS=--max-old-space-size=12288 node dist/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",

@@ -28,6 +28,7 @@ export type EngineEvent =
   | { type: 'message'; message: ChatMessage; source: 'user' | 'assistant' | 'system' | 'memory' }
   | { type: 'interrupted' }
   | { type: 'error'; message: string }
+  | { type: 'delegated'; subagentId: string; label: string; report: string; turns: number }
   | { type: 'session-end'; sessionId: string; reason: string };
 
 export type EngineEventSink = (event: EngineEvent) => void;

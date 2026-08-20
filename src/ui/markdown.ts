@@ -10,6 +10,8 @@
  * stripping the markers.
  */
 
+import { charWidth } from './components/prompt-text.js';
+
 export interface StyledSegment {
   text: string;
   bold?: boolean;
@@ -263,8 +265,40 @@ export function markdownToPlain(md: string): string {
     .join('\n');
 }
 
-/** Truncate long lines (rendering protection) */
+/** Display width of a string (CJK/fullwidth/emoji count as 2 columns). */
+function displayWidth(s: string): number {
+  let w = 0;
+  for (let i = 0; i < s.length; ) {
+    const ch = String.fromCodePoint(s.codePointAt(i)!);
+    w += charWidth(ch);
+    i += ch.length;
+  }
+  return w;
+}
+
+/**
+ * Clip a string to a max DISPLAY width (terminal columns), not code points: CJK/fullwidth
+ * characters count as 2 columns, so clipping by string length truncates Chinese text one
+ * column short and overflows the line. An exact-fit string is returned whole; an overflowing
+ * one is cut to fit maxColumns-1 and gets a trailing '…' (total NEVER exceeds maxColumns —
+ * this is a rendering protection, overflow is the failure mode it exists to prevent).
+ */
+export function clipByWidth(text: string, maxColumns: number): string {
+  if (maxColumns <= 0) return '';
+  if (displayWidth(text) <= maxColumns) return text;
+  let w = 0;
+  let i = 0;
+  while (i < text.length) {
+    const ch = String.fromCodePoint(text.codePointAt(i)!);
+    const cw = charWidth(ch);
+    if (w + cw > maxColumns - 1) break; // reserve one column for '…'
+    w += cw;
+    i += ch.length;
+  }
+  return text.slice(0, i) + '…';
+}
+
+/** Truncate long lines (rendering protection) — by display width (CJK-safe). */
 export function clipLine(text: string, maxWidth: number): string {
-  if (text.length <= maxWidth) return text;
-  return text.slice(0, Math.max(0, maxWidth - 1)) + '…';
+  return clipByWidth(text, maxWidth);
 }

@@ -75,6 +75,8 @@ export function makeBashTool(workspace: string): ToolDef {
       return new Promise<ToolResult>((resolvePromise) => {
         let stdout = '';
         let stderr = '';
+        let stdoutTotal = 0;
+        let stderrTotal = 0;
         let settled = false;
         const finish = (result: ToolResult) => {
           if (settled) return;
@@ -100,47 +102,63 @@ export function makeBashTool(workspace: string): ToolDef {
         const timer = setTimeout(() => {
           child.kill();
           finish({
-            content: `Command timed out (${timeout}ms) and was killed: ${command}\n--- stdout ---\n${truncate(stdout)}\n--- stderr ---\n${truncate(stderr)}`,
+            content: `Command timed out (${timeout}ms) and was killed: ${command}\n--- stdout ---\n${fmtOut(stdout, stdoutTotal)}\n--- stderr ---\n${fmtOut(stderr, stderrTotal)}`,
             isError: true,
           });
         }, timeout);
 
         child.stdout.on('data', (chunk: Buffer) => {
-          stdout += chunk.toString();
+          const text = chunk.toString();
+          stdoutTotal += text.length;
+          // Cap accumulated output: a chatty command must not pin unbounded strings in the
+          // tool result (only the first MAX_OUTPUT_CHARS are kept; the total is reported).
           if (stdout.length < MAX_OUTPUT_CHARS) {
-            ctx.emit({ type: 'tool-progress', callId: ctx.callId ?? '', text: chunk.toString() });
+            stdout += text;
+            ctx.emit({ type: 'tool-progress', callId: ctx.callId ?? '', text });
           }
         });
         child.stderr.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString();
-          ctx.emit({ type: 'tool-progress', callId: ctx.callId ?? '', text: chunk.toString() });
+          const text = chunk.toString();
+          stderrTotal += text.length;
+          if (stderr.length < MAX_OUTPUT_CHARS) stderr += text;
+          ctx.emit({ type: 'tool-progress', callId: ctx.callId ?? '', text });
         });
         child.on('error', (e) => {
           clearTimeout(timer);
+          detachAbort();
           finish({ content: `Failed to start the command: ${e.message}`, isError: true });
         });
         child.on('close', (code, signal) => {
           clearTimeout(timer);
+          detachAbort();
           const killed = signal ? ` (killed by signal ${signal})` : '';
           const ok = code === 0;
           const content = [
             `$ ${command}`,
-            ok || !stdout ? '' : `--- stdout ---\n${truncate(stdout)}`,
-            stderr ? `--- stderr ---\n${truncate(stderr)}` : '',
+            ok || !stdout ? '' : `--- stdout ---\n${fmtOut(stdout, stdoutTotal)}`,
+            stderr ? `--- stderr ---\n${fmtOut(stderr, stderrTotal)}` : '',
             `[exit code: ${code}${killed ? ', ' + killed : ''}]`,
           ]
             .filter((s) => s !== '')
             .join('\n');
           finish({
-            content: ok && !stderr ? `$ ${command}\n${truncate(stdout).trim()}\n[exit code: 0]` : content,
+            content: ok && !stderr ? `$ ${command}\n${fmtOut(stdout, stdoutTotal).trim()}\n[exit code: 0]` : content,
             isError: !ok,
           });
         });
+
+        // The abort listener pins the child closure on the (long-lived) turn signal; once the
+        // command has exited there is nothing left to kill, so detach it or every bash call
+        // would accumulate a listener on the session signal.
+        function detachAbort() {
+          if (ctx.signal) ctx.signal.removeEventListener('abort', onAbort);
+        }
       });
     },
   };
 }
 
-function truncate(s: string): string {
-  return s.length > MAX_OUTPUT_CHARS ? s.slice(0, MAX_OUTPUT_CHARS) + `\n… (output truncated, ${s.length} chars total)` : s;
+/** Format captured output: append a truncation note when the total exceeded the cap. */
+function fmtOut(s: string, total: number): string {
+  return total > MAX_OUTPUT_CHARS ? `${s}\n… (output truncated, ${total} chars total)` : s;
 }

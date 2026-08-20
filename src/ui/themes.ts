@@ -7,11 +7,20 @@
  *   - CLI:     deepcode --theme <id>
  *   - runtime: /theme [id]        inside the TUI
  *
+ * Every theme declares a `mode` ('light' | 'dark'). When NO theme is configured
+ * explicitly, the TUI probes the terminal background color at startup and
+ * automatically picks a light theme on light backgrounds (see
+ * src/ui/background.ts), so Mac-default white terminals never show unreadable
+ * near-white text.
+ *
  * Colors are chosen for 256-color terminals; Ink accepts hex strings and
- * named ANSI colors.
+ * named ANSI colors. Light-theme text colors are dark enough to pass WCAG AA
+ * contrast on a white background; dark-theme text is bright on near-black.
  */
 
 export type ThemeColors = {
+  /** Background this palette is designed for (light terminals use dark text) */
+  mode: 'light' | 'dark';
   primary: string;
   success: string;
   error: string;
@@ -20,8 +29,8 @@ export type ThemeColors = {
   user: string;
   assistant: string;
   code: string;
-  /** Background of code blocks (undefined = transparent) */
-  codeBg?: string;
+  /** Background of code blocks (every built-in theme sets this) */
+  codeBg: string;
   diffAdd: string;
   diffDel: string;
   diffHunk: string;
@@ -40,6 +49,8 @@ export interface ThemeDef extends ThemeColors {
   name: string;
   /** Short human description shown in `/theme` */
   description: string;
+  /** Terminal background this palette is designed for (drives auto-selection) */
+  mode: 'light' | 'dark';
 }
 
 export const THEME_IDS = [
@@ -49,6 +60,8 @@ export const THEME_IDS = [
   'nord',
   'solarized',
   'matrix',
+  'light',
+  'gruvbox-light',
 ] as const;
 
 export type ThemeId = (typeof THEME_IDS)[number];
@@ -59,6 +72,7 @@ export const THEMES: Record<ThemeId, ThemeDef> = {
     id: 'default',
     name: 'Default',
     description: 'GitHub-dark inspired baseline',
+    mode: 'dark',
     primary: '#4f9cf9',
     success: '#3fb950',
     error: '#f85149',
@@ -84,6 +98,7 @@ export const THEMES: Record<ThemeId, ThemeDef> = {
     id: 'dracula',
     name: 'Dracula',
     description: 'High-contrast purple/pink palette',
+    mode: 'dark',
     primary: '#bd93f9',
     success: '#50fa7b',
     error: '#ff5555',
@@ -109,6 +124,7 @@ export const THEMES: Record<ThemeId, ThemeDef> = {
     id: 'gruvbox',
     name: 'Gruvbox',
     description: 'Warm retro, low eye strain',
+    mode: 'dark',
     primary: '#83a598',
     success: '#b8bb26',
     error: '#fb4934',
@@ -134,6 +150,7 @@ export const THEMES: Record<ThemeId, ThemeDef> = {
     id: 'nord',
     name: 'Nord',
     description: 'Arctic blue-grey, calm contrast',
+    mode: 'dark',
     primary: '#88c0d0',
     success: '#a3be8c',
     error: '#bf616a',
@@ -159,6 +176,7 @@ export const THEMES: Record<ThemeId, ThemeDef> = {
     id: 'solarized',
     name: 'Solarized',
     description: 'Classic light/dark duality',
+    mode: 'dark',
     primary: '#268bd2',
     success: '#859900',
     error: '#dc322f',
@@ -184,6 +202,7 @@ export const THEMES: Record<ThemeId, ThemeDef> = {
     id: 'matrix',
     name: 'Matrix',
     description: 'Terminal-green monochrome',
+    mode: 'dark',
     primary: '#00ff41',
     success: '#00ff41',
     error: '#ff2e2e',
@@ -203,6 +222,60 @@ export const THEMES: Record<ThemeId, ThemeDef> = {
     toolExec: '#ffff55',
     toolSearch: '#00aa2a',
     toolOther: '#00aa2a',
+  },
+  // Light — GitHub-light inspired: high-contrast dark text on a white background.
+  // Every slot passes WCAG AA on #ffffff, so a Mac-default (light) terminal stays readable.
+  light: {
+    id: 'light',
+    name: 'Light',
+    description: 'High-contrast light (white background)',
+    mode: 'light',
+    primary: '#0969da',
+    success: '#1a7f37',
+    error: '#cf222e',
+    warning: '#9a6700',
+    muted: '#59636e',
+    user: '#0969da',
+    assistant: '#1f2328',
+    code: '#1f2328',
+    codeBg: '#f6f8fa',
+    diffAdd: '#1a7f37',
+    diffDel: '#cf222e',
+    diffHunk: '#0969da',
+    thinking: '#59636e',
+    accent: '#8250df',
+    toolRead: '#0969da',
+    toolEdit: '#8250df',
+    toolExec: '#9a6700',
+    toolSearch: '#59636e',
+    toolOther: '#59636e',
+  },
+  // Gruvbox Light — warm paper background (#fbf1c7) with dark warm-grey text;
+  // a softer alternative to the white `light` theme for light terminals.
+  'gruvbox-light': {
+    id: 'gruvbox-light',
+    name: 'Gruvbox Light',
+    description: 'Warm paper background, soft contrast',
+    mode: 'light',
+    primary: '#076678',
+    success: '#79740e',
+    error: '#9d0006',
+    warning: '#b57614',
+    muted: '#7c6f64',
+    user: '#076678',
+    assistant: '#282828',
+    code: '#282828',
+    codeBg: '#ebdbb2',
+    diffAdd: '#79740e',
+    diffDel: '#9d0006',
+    diffHunk: '#076678',
+    thinking: '#7c6f64',
+    accent: '#8f3f71',
+    toolRead: '#076678',
+    toolEdit: '#8f3f71',
+    toolExec: '#b57614',
+    toolSearch: '#7c6f64',
+    toolOther: '#7c6f64',
   },
 };
 
@@ -258,6 +331,34 @@ export function resolveTheme(id: string | undefined): ThemeDef {
 export function themeListing(): string[] {
   return THEME_IDS.map((id) => {
     const t = THEMES[id];
-    return `  ${id.padEnd(12)} ${t.name} — ${t.description}`;
+    return `  ${id.padEnd(12)} ${t.name} — ${t.description} [${t.mode}]`;
   });
+}
+
+/* ---------------------------------------------------------------------------
+ * Contrast helpers (used by tests to guard readability on any background)
+ * ------------------------------------------------------------------------- */
+
+/** Relative luminance of a #rrggbb color (WCAG 2.x formula, 0 = black, 1 = white). */
+export function luminance(hex: string): number {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return 0;
+  const channels = [0, 2, 4].map((i) => {
+    const v = parseInt(m[1]!.slice(i, i + 2), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
+}
+
+/** WCAG contrast ratio between two colors (1..21). */
+export function contrastRatio(a: string, b: string): number {
+  const la = luminance(a);
+  const lb = luminance(b);
+  const [hi, lo] = la >= lb ? [la, lb] : [lb, la];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** Background luminance each theme is designed for (approx: white for light, near-black for dark). */
+export function themeBackgroundLuminance(theme: ThemeDef): number {
+  return theme.mode === 'light' ? 1 : 0;
 }

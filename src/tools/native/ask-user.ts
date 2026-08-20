@@ -29,7 +29,9 @@ export function makeAskUserTool(): ToolDef {
         return { content: `ask_user invalid arguments: ${parsed.error.issues.map((i) => i.message).join('; ')}`, isError: true };
       }
       const { question, options } = parsed.data;
-      const [decision] = await ctx.askApproval([
+      // Use askApprovalBatch so an aborted dialog (x / ESC) is distinguishable from a plain
+      // "no": the tool must never report "no answer" for a decision the user DID make.
+      const { decisions, aborted } = await ctx.askApprovalBatch([
         {
           callId: 'ask-user',
           toolName: 'ask_user',
@@ -37,12 +39,18 @@ export function makeAskUserTool(): ToolDef {
           risk: 'low',
         },
       ]);
-      if (!decision || decision.action === 'deny') {
-        return { content: 'User did not answer the question', isError: true };
+      const [decision] = decisions;
+      if (aborted || !decision) {
+        return { content: 'User aborted the question', isError: true };
+      }
+      // In the dialog, [n] deny / [d] always deny answer the question negatively; allow
+      // without feedback (the [y]/[a]/[A] keys) means the user approved → affirmative answer.
+      if (decision.action === 'deny' || decision.action === 'deny-always') {
+        return { content: 'User answer: no' };
       }
       const answer = decision.feedback?.trim();
-      if (!answer) return { content: 'User did not provide an answer', isError: true };
-      return { content: `User answer: ${answer}` };
+      if (answer) return { content: `User answer: ${answer}` };
+      return { content: 'User answer: yes' };
     },
   };
 }

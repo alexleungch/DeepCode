@@ -11,6 +11,9 @@ import type { LLMProvider, LLMRequest, LLMStreamEvent } from '../src/providers/t
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Command that runs ~2-3s on both platforms (Windows cmd has no `sleep`). */
+const slowCommand = () => (process.platform === 'win32' ? 'ping -n 3 127.0.0.1 > nul' : 'sleep 2');
+
 let home: string;
 let ws: string;
 let prevHome: string | undefined;
@@ -48,7 +51,7 @@ describe('full TUI spinner during tool run', () => {
           yield {
             type: 'done',
             response: {
-              message: { role: 'assistant', content: [{ type: 'text', text: 'Calling tool' }, { type: 'tool_use', id: 'c1', name: 'run_terminal_cmd', input: { command: 'sleep 2' } }] },
+              message: { role: 'assistant', content: [{ type: 'text', text: 'Calling tool' }, { type: 'tool_use', id: 'c1', name: 'run_terminal_cmd', input: { command: slowCommand() } }] },
               usage: { inputTokens: 10, outputTokens: 5 },
               stopReason: 'tool_use',
             },

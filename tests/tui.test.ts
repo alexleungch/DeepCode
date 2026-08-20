@@ -98,6 +98,23 @@ describe('TUI state reducer', () => {
     expect(s.messages[0]!.toolCalls[0]!.durationMs).toBe(5);
   });
 
+  it('tool-progress with an empty callId appends only to the LAST live card (not every running card)', () => {
+    let s = emptyState();
+    s = reduceState(s, { type: 'text-delta', text: 'x' });
+    s = reduceState(s, { type: 'tool-start', callId: 'c1', name: 'run_terminal_cmd', input: { command: 'a' } });
+    s = reduceState(s, { type: 'tool-start', callId: 'c2', name: 'run_terminal_cmd', input: { command: 'b' } });
+    // Empty callId (a tool that cannot provide one): the text must land on c2 only.
+    s = reduceState(s, { type: 'tool-progress', callId: '', text: 'out\n' });
+    const [c1, c2] = s.messages[0]!.toolCalls;
+    expect(c1!.progress).toBe('');
+    expect(c2!.progress).toBe('out\n');
+    expect(c2!.status).toBe('running');
+    // With an explicit callId, the targeted card receives it.
+    s = reduceState(s, { type: 'tool-progress', callId: 'c1', text: 'more\n' });
+    expect(s.messages[0]!.toolCalls[0]!.progress).toBe('more\n');
+    expect(s.messages[0]!.toolCalls[1]!.progress).toBe('out\n');
+  });
+
   it('usage events accumulate totals (partial ignored)', () => {
     let s = emptyState();
     const base = { ts: 1, sessionId: 's', provider: 'deepseek' as const, model: 'm', inputTokens: 0, outputTokens: 0, costUsd: 0, latencyMs: 0 };

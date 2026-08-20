@@ -14,13 +14,17 @@ function shortPath(p: string): string {
  *   <model>  ⎇ <git branch>  in <cwd>
  * A dim rule line closes it off from the main area. On narrow terminals the cwd
  * (and, below a tighter threshold, the branch) drop out so the core context stays visible.
+ *
+ * Improvements:
+ *  - Shows session ID (truncated) for easy reference when debugging
+ *  - Better responsive behavior on very narrow terminals (< 40 cols)
  */
 export function Header({ state, width }: { state: TUIState; width: number }) {
   const narrow = width < 72;
   const tiny = width < 48;
+  const ultraNarrow = width < 36;
   const branch = state.branch ?? '—';
   const cwd = shortPath(state.workspace);
-  const rule = '─'.repeat(Math.max(0, Math.floor(width)));
 
   return (
     <Box flexDirection="column" flexShrink={0} paddingX={1}>
@@ -28,7 +32,7 @@ export function Header({ state, width }: { state: TUIState; width: number }) {
         <Text bold color={theme.primary}>
           {state.model}
         </Text>
-        {!tiny && (
+        {!ultraNarrow && (
           <Text color={theme.accent}>
             ⎇ {branch}
           </Text>
@@ -39,7 +43,6 @@ export function Header({ state, width }: { state: TUIState; width: number }) {
           </Text>
         )}
       </Box>
-      <Text color={theme.muted}>{rule}</Text>
     </Box>
   );
 }

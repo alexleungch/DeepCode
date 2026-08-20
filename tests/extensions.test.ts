@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { connectMcpServer } from '../src/tools/mcp/client.js';
 import { createWorktree, mergeWorktree, worktreeSummary, discardWorktree } from '../src/git/worktree.js';
 import { runSubagent } from '../src/agent/subagent.js';
+import { makeSubtasksTool } from '../src/tools/native/subtasks.js';
 import type { LLMProvider, LLMRequest, LLMResponse, LLMStreamEvent } from '../src/providers/types.js';
 import { ToolRegistry } from '../src/tools/registry.js';
 import { ToolExecutor } from '../src/tools/executor.js';
@@ -213,5 +214,135 @@ describe('subagent (fake provider script)', () => {
     );
     expect(result.stopReason).toBe('error');
     expect(result.error).toBeTruthy();
+  });
+});
+
+describe('Orchestrator & Sub-Agent pattern (run_subtasks)', () => {
+  const scriptedProvider = (): LLMProvider => ({
+    id: 'deepseek',
+    model: 'deepseek-chat',
+    modelMeta: { id: 'deepseek-chat', windowTokens: 128_000, supportsVision: false, supportsTools: true, cacheControl: 'auto' },
+    async *stream(req: LLMRequest): AsyncIterable<LLMStreamEvent> {
+      yield {
+        type: 'done',
+        response: {
+          message: { role: 'assistant', content: [{ type: 'text', text: '## Report\nSubtask done' }] },
+          usage: { inputTokens: 10, outputTokens: 5 },
+          stopReason: 'end_turn',
+        },
+      };
+    },
+    async complete() {
+      throw new Error('not used');
+    },
+  });
+
+  it('dispatches multiple subtasks in parallel and returns a merged report', async () => {
+    const tool = makeSubtasksTool();
+    const spawned: { task: string; label: string; depth: number }[] = [];
+    // Fake runtime records spawns and returns canned reports (mirrors the engine runtime shape).
+    const ctx: ToolContext = {
+      cwd: dir,
+      workspace: dir,
+      sessionId: 's1',
+      config: defaultConfig(),
+      permissionMode: 'ask',
+      askApproval: async () => [],
+      askApprovalBatch: async () => ({ decisions: [], aborted: false }),
+      emit: () => undefined,
+      signal: new AbortController().signal,
+      subagentDepth: 0,
+      addAllowedDir: () => undefined,
+      subagents: {
+        activeCount: 0,
+        spawn: async (opts) => {
+          spawned.push(opts);
+          return { subagentId: 'x', label: opts.label, report: `report for ${opts.label}`, turns: 2, interrupted: false, stopReason: 'end_turn', tokensUsed: 100 };
+        },
+      },
+    };
+
+    const result = await tool.execute(
+      {
+        tasks: [
+          { task: 'update the tests', label: 'tester' },
+          { task: 'scan module B', label: 'scanner' },
+          { task: 'reproduce bug A', label: 'repro' },
+        ],
+      },
+      ctx,
+    );
+    expect(spawned).toHaveLength(3);
+    expect(spawned.map((s) => s.label)).toEqual(['tester', 'scanner', 'repro']);
+    // Subtasks run at depth 1 (one level below the orchestrator).
+    expect(spawned.every((s) => s.depth === 1)).toBe(true);
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('# Subtask results (3 subtasks)');
+    expect(result.content).toContain('report for tester');
+    expect(result.content).toContain('report for scanner');
+    expect(result.content).toContain('report for repro');
+  });
+
+  it('marks the batch as failed when any subtask errors', async () => {
+    const tool = makeSubtasksTool();
+    const ctx: ToolContext = {
+      cwd: dir,
+      workspace: dir,
+      sessionId: 's1',
+      config: defaultConfig(),
+      permissionMode: 'ask',
+      askApproval: async () => [],
+      askApprovalBatch: async () => ({ decisions: [], aborted: false }),
+      emit: () => undefined,
+      signal: new AbortController().signal,
+      subagentDepth: 0,
+      addAllowedDir: () => undefined,
+      subagents: {
+        activeCount: 0,
+        spawn: async (opts) =>
+          opts.label === 'bad'
+            ? { subagentId: 'x', label: opts.label, report: '', turns: 1, interrupted: false, stopReason: 'error', tokensUsed: 0, error: 'boom' }
+            : { subagentId: 'x', label: opts.label, report: 'ok', turns: 1, interrupted: false, stopReason: 'end_turn', tokensUsed: 10 },
+      },
+    };
+    const result = await tool.execute({ tasks: [{ task: 'a', label: 'ok' }, { task: 'b', label: 'bad' }] }, ctx);
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('FAILED');
+    expect(result.content).toContain('1/2 subtasks failed');
+  });
+
+  it('respects the concurrency cap by dispatching in waves', async () => {
+    const tool = makeSubtasksTool();
+    const active: number[] = [];
+    let peak = 0;
+    const config = defaultConfig();
+    config.subagents.maxConcurrent = 2;
+    const ctx: ToolContext = {
+      cwd: dir,
+      workspace: dir,
+      sessionId: 's1',
+      config,
+      permissionMode: 'ask',
+      askApproval: async () => [],
+      askApprovalBatch: async () => ({ decisions: [], aborted: false }),
+      emit: () => undefined,
+      signal: new AbortController().signal,
+      subagentDepth: 0,
+      addAllowedDir: () => undefined,
+      subagents: {
+        activeCount: 0,
+        spawn: async (opts) => {
+          active.push(1);
+          peak = Math.max(peak, active.length);
+          await new Promise((r) => setTimeout(r, 30));
+          active.pop();
+          return { subagentId: 'x', label: opts.label, report: 'ok', turns: 1, interrupted: false, stopReason: 'end_turn', tokensUsed: 10 };
+        },
+      },
+    };
+    const result = await tool.execute({ tasks: Array.from({ length: 5 }, (_, i) => ({ task: `t${i}`, label: `t${i}` })) }, ctx);
+    // 5 subtasks with maxConcurrent=2 → peak concurrency must never exceed 2.
+    expect(peak).toBeLessThanOrEqual(2);
+    expect(result.content).toContain('# Subtask results (5 subtasks)');
   });
 });

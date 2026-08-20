@@ -8,6 +8,18 @@ import type { PermissionMode } from '../config/types.js';
 
 /** TUI state: pure-function reducer over the event stream (unit-testable) */
 
+/** Most recently started still-live tool card (for tool-progress events with an empty callId). */
+function lastLiveCallId(messages: MessageView[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const calls = messages[i]!.toolCalls;
+    for (let j = calls.length - 1; j >= 0; j--) {
+      const tc = calls[j]!;
+      if (tc.status === 'running' || tc.status === 'streaming') return tc.callId;
+    }
+  }
+  return undefined;
+}
+
 export interface ToolCallView {
   callId: string;
   name: string;
@@ -105,9 +117,40 @@ export function emptyState(): TUIState {
 // can be ordered chronologically (message ids and notice ids are comparable).
 let seqId = 0;
 
+/**
+ * TUI memory bounds. The engine compacts `session.messages`, but the TUI message list is a
+ * separate array that would otherwise retain every turn's text, thinking, streamed tool input,
+ * live progress, and tool results (including base64 screenshots) forever. A long session would
+ * grow the heap until V8 OOM-aborts the process (uncatchable) — the "auto-exit" symptom.
+ * `trimMessages` keeps a bounded scrollback window; the engine's session file still holds the
+ * full history on disk.
+ */
+const MAX_MESSAGES = 400;
+const MAX_SUBAGENTS = 100;
+/** Cap per-card live output / streamed JSON so one chatty tool cannot balloon a card. */
+const MAX_PROGRESS_CHARS = 30_000;
+const MAX_INPUT_JSON_CHARS = 200_000;
+
+function trimMessages(messages: MessageView[]): MessageView[] {
+  return messages.length > MAX_MESSAGES ? messages.slice(-MAX_MESSAGES) : messages;
+}
+
 /** Next id for a message or notice view (also used by pushNotice outside the reducer). */
 export function nextSeqId(): number {
   return ++seqId;
+}
+
+/**
+ * Settle a trailing streaming assistant message (streaming=false), used by the terminal events
+ * (turn-end / interrupted / error) so a turn that produced only thinking — or was aborted mid-
+ * thinking — never leaves the "Thinking…" spinner stuck. Idempotent: already-settled messages
+ * are returned unchanged (the same array reference, so React can bail out).
+ */
+function settleLastStreaming(messages: MessageView[]): MessageView[] {
+  if (messages.length === 0) return messages;
+  const last = messages[messages.length - 1]!;
+  if (last.role !== 'assistant' || !last.streaming) return messages;
+  return [...messages.slice(0, -1), { ...last, streaming: false }];
 }
 
 export function reduceState(state: TUIState, event: EngineEvent): TUIState {
@@ -136,7 +179,7 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
       } else {
         messages.push({ id: ++seqId, role: 'assistant', text: event.text, thinking: '', toolCalls: [], streaming: true, source: 'assistant' });
       }
-      return { ...state, messages };
+      return { ...state, messages: trimMessages(messages) };
     }
 
     case 'thinking-delta': {
@@ -149,7 +192,7 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
         // assistant message to attach it to, otherwise the thinking would be silently dropped.
         messages.push({ id: ++seqId, role: 'assistant', text: '', thinking: event.text, toolCalls: [], streaming: true, source: 'assistant' });
       }
-      return { ...state, messages };
+      return { ...state, messages: trimMessages(messages) };
     }
 
     case 'message': {
@@ -184,11 +227,16 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
           messages.push({ id: ++seqId, role: 'assistant', text, thinking: '', toolCalls, streaming: false, source: 'assistant' });
         }
       }
-      return { ...state, messages };
+      return { ...state, messages: trimMessages(messages) };
     }
 
-    case 'turn-end':
-      return { ...state, busy: false, lastStopReason: event.stopReason };
+    case 'turn-end': {
+      // Settle a trailing streaming assistant message: a thinking-only / empty-text turn never
+      // emits a `message` event (loop.ts drops it via hasVisibleContent), so without this the
+      // spinner would keep spinning forever. The thinking text is preserved for MessageList to
+      // render as the visible answer when there is no text.
+      return { ...state, busy: false, lastStopReason: event.stopReason, messages: settleLastStreaming(state.messages) };
+    }
 
     case 'tool-start': {
       // If a tool call with this callId already exists (e.g. created from the streamed tool_use block
@@ -220,44 +268,70 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
         ...last,
         toolCalls: [...last.toolCalls, { callId: event.callId, name: event.name, input: event.input, inputJson: '', progress: '', status: 'streaming' as const }],
       };
-      return { ...state, currentTool: event.name, messages };
+      return { ...state, currentTool: event.name, messages: trimMessages(messages) };
     }
 
     case 'tool-input-delta': {
-      const messages = state.messages.map((m) => ({
-        ...m,
-        toolCalls: m.toolCalls.map((tc) =>
-          tc.callId === event.callId ? { ...tc, inputJson: tc.inputJson + event.partialJson, status: 'streaming' as const } : tc,
+      // Locate the ONE affected message (mirroring tool-start) instead of spreading every
+      // message object — tool-input-delta fires ~16ms/frame during streaming, and preserving
+      // the identity of untouched messages lets memoized MessageItem/ToolCard skip re-renders.
+      const msgIdx = state.messages.findIndex((m) => m.toolCalls.some((tc) => tc.callId === event.callId));
+      if (msgIdx < 0) return state;
+      const messages = [...state.messages];
+      const msg = messages[msgIdx]!;
+      messages[msgIdx] = {
+        ...msg,
+        toolCalls: msg.toolCalls.map((tc) =>
+          tc.callId === event.callId
+            ? { ...tc, inputJson: (tc.inputJson + event.partialJson).slice(-MAX_INPUT_JSON_CHARS), status: 'streaming' as const }
+            : tc,
         ),
-      }));
+      };
       return { ...state, messages };
     }
 
     case 'tool-progress': {
-      // Live output from a running tool (bash stdout/stderr). Appends to the matching card
-      // (callId may be '' for tools that cannot provide one — then the last running card is used).
-      const messages = state.messages.map((m) => ({
-        ...m,
-        toolCalls: m.toolCalls.map((tc) => {
-          if (tc.callId !== event.callId) {
-            if (!event.callId && tc.status === 'running') return { ...tc, progress: tc.progress + event.text };
-            return tc;
-          }
-          return { ...tc, progress: tc.progress + event.text, status: 'running' as const };
-        }),
-      }));
+      // Live output from a running tool (bash stdout/stderr). With a callId, append to that
+      // card; with an EMPTY callId (tools that cannot provide one) append ONLY to the most
+      // recently started live card — the old code matched every running card at once, so a
+      // single bash output line was duplicated across all in-flight tool cards.
+      const targetId = event.callId || lastLiveCallId(state.messages);
+      if (!targetId) return state;
+      const msgIdx = state.messages.findIndex((m) => m.toolCalls.some((tc) => tc.callId === targetId));
+      if (msgIdx < 0) return state;
+      const messages = [...state.messages];
+      const msg = messages[msgIdx]!;
+      messages[msgIdx] = {
+        ...msg,
+        toolCalls: msg.toolCalls.map((tc) =>
+          tc.callId === targetId
+            ? { ...tc, progress: (tc.progress + event.text).slice(-MAX_PROGRESS_CHARS), status: 'running' as const }
+            : tc,
+        ),
+      };
       return { ...state, messages };
     }
 
     case 'tool-result': {
-      const messages: MessageView[] = state.messages.map((m) => ({
-        ...m,
-        toolCalls: m.toolCalls.map((tc): ToolCallView =>
+      // Update ONLY the message that owns the settled call (identity-preserving for all other
+      // messages, so memoized cards skip re-render while this one settles).
+      const msgIdx = state.messages.findIndex((m) => m.toolCalls.some((tc) => tc.callId === event.callId));
+      if (msgIdx < 0) return { ...state, currentTool: undefined };
+      const messages = [...state.messages];
+      const msg = messages[msgIdx]!;
+      // Strip base64 screenshots from the retained result: the TUI renders only diff/content
+      // (ToolCard) and detects image references from message TEXT (ImageCard), so result.images
+      // is never displayed. Keeping it pins a full screenshot (100KB-2MB of base64) in TUI state
+      // for the whole session — a major leak in browser_review-heavy sessions.
+      const { images: _unusedImages, ...stripped } = event.result;
+      messages[msgIdx] = {
+        ...msg,
+        toolCalls: msg.toolCalls.map((tc): ToolCallView =>
           tc.callId === event.callId
-            ? { ...tc, status: event.result.isError ? 'error' : 'done', result: event.result, durationMs: event.durationMs }
+            ? { ...tc, status: event.result.isError ? 'error' : 'done', result: stripped, durationMs: event.durationMs }
             : tc,
         ),
-      }));
+      };
       return { ...state, currentTool: undefined, messages };
     }
 
@@ -302,7 +376,9 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
 
     case 'subagent-status': {
       const others = state.subagents.filter((s) => s.id !== event.subagentId);
-      const subagents = [...others, { id: event.subagentId, label: event.label, status: event.status }];
+      // Bound the subagent roster: a long session with many subagents would otherwise grow
+      // `state.subagents` without limit. The status bar only needs the most recent few.
+      const subagents = [...others, { id: event.subagentId, label: event.label, status: event.status }].slice(-MAX_SUBAGENTS);
       return {
         ...state,
         subagents,
@@ -315,10 +391,12 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
 
     case 'interrupted':
       // Same-group semantics: a new Interrupted/Error replaces the previous one instead of
-      // stacking, and the next turn-start drops it entirely.
+      // stacking, and the next turn-start drops it entirely. Also settle any trailing streaming
+      // assistant message so an ESC mid-thinking doesn't leave the spinner spinning.
       return {
         ...state,
         busy: false,
+        messages: settleLastStreaming(state.messages),
         notices: [...state.notices.filter((n) => n.group !== 'status'), { id: ++seqId, text: 'Interrupted', kind: 'info' as const, group: 'status' as const }].slice(-8),
       };
 
@@ -326,8 +404,22 @@ export function reduceState(state: TUIState, event: EngineEvent): TUIState {
       return {
         ...state,
         busy: false,
+        messages: settleLastStreaming(state.messages),
         notices: [...state.notices.filter((n) => n.group !== 'status'), { id: ++seqId, text: `Error: ${event.message}`, kind: 'error' as const, group: 'status' as const }].slice(-8),
       };
+
+    case 'delegated': {
+      // The parent loop handed off to a subagent at the segment cap. The subagent's report was
+      // already pushed via the 'message' event above, so the reducer only needs to mark the turn
+      // done, capture the stop reason, and surface a notice naming the subagent.
+      return {
+        ...state,
+        busy: false,
+        lastStopReason: 'delegated',
+        messages: settleLastStreaming(state.messages),
+        notices: [...state.notices.filter((n) => n.group !== 'status'), { id: ++seqId, text: `[delegated] ${event.label} finished (${event.turns} turns). Report appended.`, kind: 'info' as const, group: 'status' as const }].slice(-8),
+      };
+    }
 
     case 'session-end':
       return { ...state, busy: false };

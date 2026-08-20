@@ -29,14 +29,27 @@ function renderItem(approval: ApprovalView, callbacks: ApprovalCallbacks, width:
   const focused = !approval.feedbackMode;
   const allDiff = item.diff ? item.diff.split('\n') : [];
   const shownDiff = diffExpanded ? allDiff : allDiff.slice(0, 40);
+  // ask_user questions carry "Options: 1. … | 2. …" on the description; render them as a
+  // numbered list (press 1-9 to answer) instead of a single cluttered line.
+  const options = parseOptions(item.description);
+  const cleanDesc = options.length > 0 ? item.description.replace(/\nOptions:.*$/, '') : (item.description || '(no description)');
   return (
     <Box flexDirection="column">
       <Text color={theme.warning} bold>
         ⚠ Approval required ({approval.focusIndex + 1}/{approval.items.length})
       </Text>
       <Text color={theme.assistant} bold>
-        {item.description}
+        {cleanDesc}
       </Text>
+      {options.length > 0 ? (
+        <Box flexDirection="column" marginLeft={1}>
+          {options.map((o, i) => (
+            <Text key={i} color={theme.accent}>
+              <Text color={theme.primary} bold>{i + 1})</Text> {o}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
       {item.command ? <Text color={theme.code}>{`$ ${clipLine(item.command, width)}`}</Text> : null}
       {item.diff ? (
         <Box flexDirection="column" marginLeft={1}>
@@ -55,21 +68,43 @@ function renderItem(approval: ApprovalView, callbacks: ApprovalCallbacks, width:
           ) : null}
         </Box>
       ) : null}
-      {item.risk === 'high' ? <Text color={theme.error}>High-risk operation, please confirm carefully</Text> : null}
-      <Text color={theme.muted} dimColor={!focused}>
-        [y] allow [n] deny [a] always allow [d] always deny [e] feedback [A] allow all [D] deny all [Tab]/[←→] switch [x] abort
-      </Text>
+      {item.risk === 'high' ? (
+        <Text color={theme.error} bold>
+          ⛔ High-risk operation — please confirm carefully
+        </Text>
+      ) : item.risk === 'medium' ? (
+        <Text color={theme.warning}>
+          ⚡ Medium-risk operation — review before approving
+        </Text>
+      ) : null}
+      {options.length > 0 ? (
+        <Text color={theme.muted} dimColor={!focused}>
+          [1-9] pick option · [y] yes · [n] no · [e] custom answer · [x] abort
+        </Text>
+      ) : (
+        <Text color={theme.muted} dimColor={!focused}>
+          [y] allow [n] deny [a] always [d] always deny [e] feedback [A] allow all [D] deny all [Tab]/[←→] switch [x] abort
+        </Text>
+      )}
       {approval.feedbackMode ? (
         <Box>
-          <Text color={theme.accent}>Feedback: </Text>
-          <Text>{approval.feedbackText || '(type a revision, Enter to submit)'}</Text>
+          <Text color={theme.accent}>{options.length > 0 ? 'Answer: ' : 'Feedback: '}</Text>
+          <Text>{approval.feedbackText || (options.length > 0 ? '(type your answer, Enter to submit)' : '(type a revision, Enter to submit)')}</Text>
         </Box>
       ) : null}
     </Box>
   );
 }
 
-/** Batch approval dialog (the core interaction of Ask mode) */
+/**
+ * Batch approval dialog (the core interaction of Ask mode).
+ *
+ * Improvements:
+ *  - Risk warnings are more prominent with icon prefix
+ *  - Option numbers are color-coded for better visibility
+ *  - Better keyboard shortcut hints in the help line
+ *  - Empty descriptions show "(no description)" instead of blank
+ */
 export function ApprovalDialog({
   approval,
   width,

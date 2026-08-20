@@ -61,13 +61,21 @@ export function addToTotals(t: UsageTotals, e: UsageEvent): UsageTotals {
   return t;
 }
 
+/** Max usage events retained in memory. Persistence happens via the onEvent hook (UsageStore +
+ *  SessionStore), so the in-memory array only needs a bounded window for finalize()/debug; the
+ *  aggregate `totals` already carries the full session sums. Keeping every event was an unbounded
+ *  leak in long-running processes (every request appended and nothing ever trimmed). */
+const MAX_RETAINED_EVENTS = 500;
+
 /**
  * Session-level usage tracker (the in-memory side of the Session State Store):
  * accumulates after each generation/Tool Call for real-time reads by the status bar and /cost dashboard.
  */
 export class UsageTracker {
   private totals: UsageTotals = emptyTotals();
-  private events: UsageEvent[] = [];
+  /** Ring buffer of the most recent MAX_RETAINED_EVENTS events (oldest evicted once full) */
+  private events: (UsageEvent | null)[] = new Array<UsageEvent | null>(MAX_RETAINED_EVENTS).fill(null);
+  private eventCount = 0;
   private onEvent?: (e: UsageEvent) => void;
   private pricing: (model: string) => PriceEntry;
 
@@ -99,15 +107,25 @@ export class UsageTracker {
   /** Called by the Usage Extractor: normalizes and records usage returned by the provider (including immediate cost conversion) */
   track(sessionId: string, provider: ProviderId, model: string, usage: Usage, opts?: { requestId?: string; latencyMs?: number; partial?: boolean }): UsageEvent {
     const event = this.buildEvent(sessionId, provider, model, usage, opts);
-    this.events.push(event);
+    // Ring-buffer write: overwrite the oldest slot once the window is full (see MAX_RETAINED_EVENTS).
+    this.events[this.eventCount % MAX_RETAINED_EVENTS] = event;
+    this.eventCount++;
     addToTotals(this.totals, event);
     this.onEvent?.(event);
     return event;
   }
 
-  /** Session end/fallback: returns all events (for persistence) */
+  /** Session end/fallback: returns the retained window of events in chronological order (for persistence) */
   finalize(): UsageEvent[] {
-    return this.events;
+    const kept = Math.min(this.eventCount, MAX_RETAINED_EVENTS);
+    const out: UsageEvent[] = [];
+    // When the buffer has wrapped, the logical start is the slot right after the most recent write.
+    const start = kept === MAX_RETAINED_EVENTS ? this.eventCount % MAX_RETAINED_EVENTS : 0;
+    for (let i = 0; i < kept; i++) {
+      const e = this.events[(start + i) % MAX_RETAINED_EVENTS];
+      if (e) out.push(e);
+    }
+    return out;
   }
 
   /** Builds an event without recording it (for real-time streaming to the UI; the final done track is authoritative) */

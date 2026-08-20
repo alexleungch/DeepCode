@@ -30,6 +30,13 @@ export function createProvider(config: DeepcodeConfig, providerId: ProviderId, m
         defaultBaseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
         envKey: 'DASHSCOPE_API_KEY',
       });
+    case 'openrouter':
+      return new OpenAiCompatProvider(config, model, {
+        id: 'openrouter',
+        label: 'OpenRouter',
+        defaultBaseUrl: 'https://openrouter.ai/api/v1',
+        envKey: 'OPENROUTER_API_KEY',
+      });
     case 'gemini':
       return new GeminiProvider(config, model);
     case 'ollama':

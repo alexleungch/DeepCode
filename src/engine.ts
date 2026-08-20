@@ -26,6 +26,7 @@ import { detectRepo } from './git/repo.js';
 import { makeBrowserReviewTool } from './tools/native/browser/review.js';
 import { makeSkillTool } from './tools/native/skill.js';
 import { makeTaskTool } from './tools/native/task.js';
+import { makeSubtasksTool } from './tools/native/subtasks.js';
 import { connectMcpServer } from './tools/mcp/client.js';
 import { SkillLoader, skillsCatalog } from './skills/loader.js';
 import type { Skill } from './skills/types.js';
@@ -185,6 +186,8 @@ export class DeepcodeEngine {
     this.registry.register(skillTool);
     const taskTool = makeTaskTool();
     this.registry.register(taskTool);
+    // Orchestrator & Sub-Agent pattern: batch-dispatch tool (parallel sub-agents in ONE call)
+    this.registry.register(makeSubtasksTool());
 
     // -- Agent Memory (SQLite four-layer; zero external dependencies) --
     let memoryDigest = this.opts.memoryDigest;
@@ -463,8 +466,9 @@ export class DeepcodeEngine {
         case 'deepseek':
         case 'grok':
         case 'qwen':
+        case 'openrouter':
         case 'openai-compat': {
-          const baseUrl = ep?.baseUrl ?? (pid === 'deepseek' ? 'https://api.deepseek.com' : pid === 'grok' ? 'https://api.x.ai/v1' : pid === 'qwen' ? 'https://dashscope.aliyuncs.com/compatible-mode/v1' : undefined);
+          const baseUrl = ep?.baseUrl ?? (pid === 'deepseek' ? 'https://api.deepseek.com' : pid === 'grok' ? 'https://api.x.ai/v1' : pid === 'qwen' ? 'https://dashscope.aliyuncs.com/compatible-mode/v1' : pid === 'openrouter' ? 'https://openrouter.ai/api/v1' : undefined);
           const client = new OpenAI({ apiKey: key, ...(baseUrl ? { baseURL: baseUrl } : {}) });
           return client.chat.completions.create({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 });
         }
@@ -492,6 +496,7 @@ export class DeepcodeEngine {
           session: this.session,
           sessionStore: this.sessionStore,
           todoStore: this.todoStore,
+          workspace: this.workspace,
           emit: (e) => this.emit(e),
           systemPrompt: this.systemPrompt,
           approvalHandler: handler,
@@ -579,6 +584,8 @@ export function providerLabel(id: ProviderId): string {
       return 'Qwen (DashScope)';
     case 'ollama':
       return 'Ollama';
+    case 'openrouter':
+      return 'OpenRouter';
     case 'openai-compat':
       return 'OpenAI Compatible';
   }

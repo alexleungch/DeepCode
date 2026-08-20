@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, readdirSync, existsSync, rmSync, mkdirSync, statSync } from 'node:fs';
+import { appendFileSync, readFileSync, readdirSync, existsSync, rmSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { SessionLine, SessionRecord } from './types.js';
@@ -52,11 +52,12 @@ export class SessionStore {
   }
 
   private appendLine(id: string, line: SessionLine): void {
-    const file = this.fileOf(id);
-    const tmp = `${file}.tmp`;
-    const existing = existsSync(file) ? readFileSync(file, 'utf8') : '';
-    writeFileSync(tmp, existing + JSON.stringify(line) + '\n', 'utf8');
-    renameSync(tmp, file);
+    // Append-only write. The previous implementation read the ENTIRE file, concatenated the new
+    // line, and atomically replaced it (tmp + rename). For a long-lived daemon the session file
+    // grows to thousands of lines, so every append became O(file size) I/O plus a full-file
+    // transient string allocation — sustained memory churn that got worse over time. JSONL is
+    // append-only by design and load() already tolerates torn lines, so a plain append is safe.
+    appendFileSync(this.fileOf(id), JSON.stringify(line) + '\n', 'utf8');
   }
 
   appendMessage(id: string, message: ChatMessage): void {

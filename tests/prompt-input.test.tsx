@@ -1,7 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import React from 'react';
 import { PromptInput } from '../src/ui/components/PromptInput.js';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -119,6 +122,33 @@ describe('PromptInput multi-line editing', () => {
     inst.stdin.write('\r');
     await wait(30);
     expect(submitted).toEqual(['lo']);
+    inst.unmount();
+  });
+
+  it('plain Home/End move the cursor (reserved from host history scrolling)', async () => {
+    const submitted: string[] = [];
+    const inst = render(
+      React.createElement(PromptInput, {
+        disabled: false,
+        width: 100,
+        onSubmit: (t) => submitted.push(t),
+        testInput: (fn) => {
+          fn('abc');
+        },
+      }),
+    );
+    await wait(20);
+    // Home (\x1b[H) → cursor to start, type 'X' → "Xabc"
+    inst.stdin.write('\x1b[H');
+    await wait(10);
+    await typeChar(inst, 'X');
+    // End (\x1b[F) → cursor to end, type 'Y' → "XabcY"
+    inst.stdin.write('\x1b[F');
+    await wait(10);
+    await typeChar(inst, 'Y');
+    inst.stdin.write('\r');
+    await wait(30);
+    expect(submitted).toEqual(['XabcY']);
     inst.unmount();
   });
 
@@ -263,7 +293,89 @@ describe('PromptInput multi-line editing', () => {
     // row, so the inverse-video cursor was never drawn once the input exceeded maxLines.)
     expect(frame).toContain('▌');
     // A "more content" hint appears because lines exist outside the visible window.
-    expect(frame).toContain('更多内容在');
+    expect(frame).toContain('(↑ more above)');
+    inst.unmount();
+  });
+});
+
+describe('PromptInput @-file-list popup (auto-open on typing @)', () => {
+  let ws: string;
+
+  beforeEach(() => {
+    ws = mkdtempSync(join(tmpdir(), 'at-popup-'));
+    writeFileSync(join(ws, 'aaa.txt'), '', 'utf8');
+    writeFileSync(join(ws, 'bbb.txt'), '', 'utf8');
+    mkdirSync(join(ws, 'sub'), { recursive: true });
+    writeFileSync(join(ws, 'sub', 'inner.txt'), '', 'utf8');
+  });
+
+  afterEach(() => {
+    try {
+      rmSync(ws, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  it('opens a live file list the moment @ is typed, and Tab inserts the highlighted file', async () => {
+    const inst = render(
+      React.createElement(PromptInput, { disabled: false, width: 100, onSubmit: () => undefined, cwd: ws }),
+    );
+    await typeChar(inst, '@');
+    // The popup appears automatically with a match count and the top-level entries.
+    await waitFor(() => (inst.lastFrame() ?? '').includes('Attach file'));
+    const open = inst.lastFrame() ?? '';
+    expect(open).toContain('Attach file');
+    expect(open).toContain('aaa.txt');
+    expect(open).toContain('bbb.txt');
+    // Tab inserts the highlighted (first) candidate as a file ref…
+    inst.stdin.write('\t');
+    await waitFor(() => (inst.lastFrame() ?? '').includes('@aaa.txt'));
+    const after = inst.lastFrame() ?? '';
+    // …and a completed *file* closes the list (no more "Attach file" header).
+    expect(after).toContain('@aaa.txt');
+    expect(after).not.toContain('Attach file');
+    inst.unmount();
+  });
+
+  it('↑/↓ move the highlight within the @ file list', async () => {
+    const inst = render(
+      React.createElement(PromptInput, { disabled: false, width: 100, onSubmit: () => undefined, cwd: ws }),
+    );
+    await typeChar(inst, '@');
+    await waitFor(() => (inst.lastFrame() ?? '').includes('Attach file'));
+    // First entry highlighted initially.
+    expect(/\▶\s+aaa\.txt/.test(inst.lastFrame() ?? '')).toBe(true);
+    expect(/\▶\s+bbb\.txt/.test(inst.lastFrame() ?? '')).toBe(false);
+    // Down moves the highlight to the second entry.
+    inst.stdin.write('\x1b[B');
+    await wait(20);
+    expect(/\▶\s+aaa\.txt/.test(inst.lastFrame() ?? '')).toBe(false);
+    expect(/\▶\s+bbb\.txt/.test(inst.lastFrame() ?? '')).toBe(true);
+    // Up moves it back.
+    inst.stdin.write('\x1b[A');
+    await wait(20);
+    expect(/\▶\s+aaa\.txt/.test(inst.lastFrame() ?? '')).toBe(true);
+    inst.unmount();
+  });
+
+  it('descends into a directory when Tab completes a dir entry (list stays open)', async () => {
+    const inst = render(
+      React.createElement(PromptInput, { disabled: false, width: 100, onSubmit: () => undefined, cwd: ws }),
+    );
+    // Seed the value as '@s' so the only candidate is the 'sub' directory (sorted first).
+    await typeChar(inst, '@');
+    await waitFor(() => (inst.lastFrame() ?? '').includes('sub/'));
+    inst.stdin.write('s');
+    await wait(20);
+    expect((inst.lastFrame() ?? '').includes('sub/')).toBe(true);
+    // Tab on the dir entry descends: value becomes '@sub/' and the list re-opens with its contents.
+    inst.stdin.write('\t');
+    await waitFor(() => (inst.lastFrame() ?? '').includes('@sub/'));
+    const after = inst.lastFrame() ?? '';
+    expect(after).toContain('@sub/');
+    expect(after).toContain('inner.txt'); // sub's contents are now listed
+    expect(after).toContain('Attach file'); // list stays open for a directory
     inst.unmount();
   });
 });

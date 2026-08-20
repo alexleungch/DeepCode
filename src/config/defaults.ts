@@ -183,6 +183,61 @@ export const BUILTIN_MODEL_META: Record<string, ModelMeta> = {
     supportsThinking: false,
     cacheControl: 'auto',
   },
+  // OpenRouter gateway (OpenAI-compatible API; model ids are vendor-prefixed, e.g. "anthropic/claude-sonnet-4-5")
+  'openrouter/auto': {
+    id: 'openrouter/auto',
+    windowTokens: 128_000,
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: false,
+    cacheControl: 'auto',
+  },
+  'anthropic/claude-sonnet-4-5': {
+    id: 'anthropic/claude-sonnet-4-5',
+    windowTokens: 200_000,
+    maxOutputTokens: 64_000,
+    supportsVision: true,
+    supportsTools: true,
+    supportsThinking: true,
+    cacheControl: 'auto',
+  },
+  'deepseek/deepseek-chat-v3-0324': {
+    id: 'deepseek/deepseek-chat-v3-0324',
+    windowTokens: 128_000,
+    maxOutputTokens: 8_192,
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: false,
+    cacheControl: 'auto',
+  },
+  // deepseek-r1 on OpenRouter has no native function calling → JSON tool calling protocol
+  'deepseek/deepseek-r1': {
+    id: 'deepseek/deepseek-r1',
+    windowTokens: 128_000,
+    maxOutputTokens: 8_192,
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: true,
+    cacheControl: 'auto',
+    toolCallProtocol: 'json',
+  },
+  'qwen/qwen3-coder-plus': {
+    id: 'qwen/qwen3-coder-plus',
+    windowTokens: 131_072,
+    maxOutputTokens: 32_768,
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: true,
+    cacheControl: 'auto',
+  },
+  'meta-llama/llama-3.3-70b-instruct': {
+    id: 'meta-llama/llama-3.3-70b-instruct',
+    windowTokens: 128_000,
+    supportsVision: false,
+    supportsTools: true,
+    supportsThinking: false,
+    cacheControl: 'auto',
+  },
 };
 
 /** Default model selection */
@@ -193,6 +248,7 @@ export const DEFAULT_MODELS: Record<ProviderId, string> = {
   gemini: 'gemini-2.5-pro',
   qwen: 'qwen3.8-max',
   ollama: 'qwen3:32b',
+  openrouter: 'openrouter/auto',
   'openai-compat': 'custom-model',
 };
 
@@ -233,6 +289,7 @@ export function defaultConfig(): DeepcodeConfig {
       gemini: {},
       qwen: { baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1' },
       ollama: { baseUrl: 'http://localhost:11434' },
+      openrouter: { baseUrl: 'https://openrouter.ai/api/v1' },
       'openai-compat': {},
     },
     permissions: {
@@ -245,6 +302,9 @@ export function defaultConfig(): DeepcodeConfig {
       maxTokens: 128_000,
       // Compact earlier (76.8k vs 89.6k) so long sessions carry less full history per turn.
       compactAt: 0.6,
+      // Force a compaction every 20 turns — this resets the per-segment turn counter, so a long
+      // agentic task survives far past agent.maxTurns as long as each 20-turn segment makes progress.
+      compactEveryTurns: 20,
       autoCompact: true,
       keepRecentTurns: 5,
       maxSummaryTokens: 4000,
@@ -254,6 +314,7 @@ export function defaultConfig(): DeepcodeConfig {
       maxConcurrent: 3,
       maxDepth: 2,
       worktree: 'auto',
+      maxTurns: 50,
     },
     memory: {
       enabled: true,
@@ -262,6 +323,8 @@ export function defaultConfig(): DeepcodeConfig {
     },
     agent: {
       maxTurns: 25,
+      // Hard backstop: even with per-segment resets, a single runTurn call can never exceed this.
+      maxTotalTurns: 100,
       maxParallelTools: 4,
       toolTimeoutMs: 120_000,
     },
@@ -269,6 +332,20 @@ export function defaultConfig(): DeepcodeConfig {
     mcpServers: {},
     skills: { enabled: true, directories: [] },
     plugins: { enabled: true, directories: [] },
+    prompt: {
+      outputStyle: 'concise',
+      maxResponseChars: 0,
+      examples: [],
+      completionProtocol: true,
+      verifyOnDone: true,
+      quality: {
+        minToolSuccessRate: 0.8,
+        maxTurns: 30,
+        maxTokensPerTask: 150_000,
+        requireSettled: true,
+        maxRetriesOnFail: 2,
+      },
+    },
     telegram: {
       allowChatIds: [],
       longPollTimeoutSec: 25,

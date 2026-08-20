@@ -384,8 +384,10 @@ export class OpenAiCompatProvider implements LLMProvider {
         text += delta.content;
         yield { type: 'text-delta', text: delta.content };
       }
-      // Forward DeepSeek reasoning_content
-      const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
+      // Forward thinking tokens: DeepSeek uses `reasoning_content`; OpenRouter / Gemini-compatible
+      // gateways expose the same field on the OpenAI wire format as `reasoning`.
+      const deltaExt = delta as { reasoning_content?: string; reasoning?: string };
+      const reasoning = deltaExt.reasoning_content ?? deltaExt.reasoning;
       if (reasoning) yield { type: 'thinking-delta', text: reasoning };
       for (const tc of delta?.tool_calls ?? []) {
         const idx = tc.index ?? 0;

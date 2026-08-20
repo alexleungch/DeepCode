@@ -31,7 +31,7 @@ Claude Code-style TypeScript terminal coding agent CLI. ReAct agent loop + multi
 
 | Capability | Description |
 |---|---|
-| **Multi-provider** | DeepSeek (default) / Anthropic / Gemini / Grok / Qwen / local Ollama / any OpenAI-compatible endpoint |
+| **Multi-provider** | DeepSeek (default) / Anthropic / Gemini / Grok / Qwen / local Ollama / OpenRouter / any OpenAI-compatible endpoint |
 | **ReAct agent loop** | Perception → action → observation closed loop; parallel tool calling; automatic self-correction on non-zero exit codes |
 | **Ask approval mode (default)** | Writing files / running commands / deleting / committing / deploying pauses for human diff approval; batch approval; can attach revision feedback |
 | **Native tools** | `read_file` `write_file` `edit_file` `run_terminal_cmd` `browser_review` `glob` `grep` `todo_write` `ask_user` `skill` `task` |
@@ -110,10 +110,15 @@ If you run the CLI before building, the startup shim prints a hint:
 deepcode config init          # creates ~/.deepcode/config.json template
 
 # 2. Provide an API key (choose any provider)
-set DEEPSEEK_API_KEY=sk-xxx   # or edit the config file (env:VAR references supported)
+set DEEPSEEK_API_KEY=sk-xxx      # DeepSeek (default)
+set OPENROUTER_API_KEY=sk-or-xxx # or OpenRouter gateway (any vendor-prefixed model id)
+                                  # or edit the config file (env:VAR references supported)
 
 # 3. Zero-cost start: local Ollama
 deepcode --provider ollama --model qwen3:32b
+
+# 3b. Via OpenRouter
+deepcode --provider openrouter --model anthropic/claude-sonnet-4-5
 
 # 4. Go
 deepcode "Explain this project's structure"           # TUI interactive (start working with a prompt)
@@ -134,7 +139,8 @@ deepcode "Refactor" --permission-mode acceptEdits     # skip approval for file e
     "gemini": "gemini-2.5-pro",
     "grok": "grok-4",
     "qwen": "qwen3.8-max",
-    "ollama": "qwen3:32b"
+    "ollama": "qwen3:32b",
+    "openrouter": "anthropic/claude-sonnet-4-5"
   },
   "providers": {
     "deepseek": { "apiKey": "env:DEEPSEEK_API_KEY", "baseUrl": "https://api.deepseek.com" },
@@ -142,7 +148,8 @@ deepcode "Refactor" --permission-mode acceptEdits     # skip approval for file e
     "gemini": { "apiKey": "env:GOOGLE_API_KEY" },
     "grok": { "apiKey": "env:XAI_API_KEY", "baseUrl": "https://api.x.ai/v1" },
     "qwen": { "apiKey": "env:DASHSCOPE_API_KEY", "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1" },
-    "ollama": { "baseUrl": "http://localhost:11434" }
+    "ollama": { "baseUrl": "http://localhost:11434" },
+    "openrouter": { "apiKey": "env:OPENROUTER_API_KEY", "baseUrl": "https://openrouter.ai/api/v1" }
   },
   "permissions": { "mode": "ask", "allow": [], "deny": [], "additionalDirectories": [] },
   "context": { "maxTokens": 128000, "compactAt": 0.7, "autoCompact": true, "keepRecentTurns": 5 }
@@ -208,6 +215,7 @@ deepcode --provider anthropic --model claude-sonnet-4-5
 deepcode --provider qwen --model qwen3.8-max
 deepcode --provider ollama --model qwen3:32b
 deepcode --provider deepseek --model deepseek-reasoner
+deepcode --provider openrouter --model anthropic/claude-sonnet-4-5   # any vendor-prefixed OpenRouter model id
 ```
 
 Or at runtime inside the TUI: `/models deepseek deepseek-reasoner` (prompts for the model and, if needed, the API key).
@@ -216,10 +224,13 @@ Or at runtime inside the TUI: `/models deepseek deepseek-reasoner` (prompts for 
 
 ```bash
 deepcode --theme dracula       # start the TUI with the Dracula palette
-deepcode --theme matrix
+deepcode --theme light         # high-contrast light theme (white terminal background)
+deepcode --theme gruvbox-light # warm paper light theme
 ```
 
-Or at runtime inside the TUI: `/theme` lists the built-in themes, `/theme <id>` switches immediately (verified + persisted to `~/.deepcode/config.json`). Themes: `default` `dracula` `gruvbox` `nord` `solarized` `matrix`.
+Or at runtime inside the TUI: `/theme` lists the built-in themes, `/theme <id>` switches immediately (verified + persisted to `~/.deepcode/config.json`). Themes: `default` `dracula` `gruvbox` `nord` `solarized` `matrix` `light` `gruvbox-light`.
+
+**Light-terminal auto-detection**: when no theme is configured (no `--theme`, no `ui.theme` in config), the TUI probes the terminal background color on startup and automatically uses the `light` theme on light/white backgrounds — so a Mac-default (light) terminal never shows unreadable near-white text. The detection is an adaptive default only; it is never persisted, and an explicit `/theme <id>`, `--theme <id>`, or `ui.theme` config value always wins. (Detection uses the OSC 11 color query — supported by iTerm2, kitty, WezTerm, Warp, Windows Terminal, VS Code, Ghostty, etc. — with an appearance-based fallback for macOS Terminal.app.)
 
 ### 6. Configuration
 
@@ -299,7 +310,7 @@ Other public exports include `ToolRegistry`, `ToolExecutor`, `PermissionGate`, `
 |---|---|
 | `/help` | Show all available slash commands |
 | `/theme` | List the available TUI themes |
-| `/theme <id>` | Switch the TUI theme (`default` `dracula` `gruvbox` `nord` `solarized` `matrix`) — persists to `~/.deepcode/config.json` |
+| `/theme <id>` | Switch the TUI theme (`default` `dracula` `gruvbox` `nord` `solarized` `matrix` `light` `gruvbox-light`) — persists to `~/.deepcode/config.json` |
 | `/key [KEY]` | Set the API key for the current provider (verified against the API before saving; bare `/key` shows its status) |
 | `/models` | List configured models (only vendors with a working API key) + supported vendors |
 | `/models <vendor> [model]` | Add/switch a vendor: prompts for the model name and, if needed, the API key (verified against the API before saving; persisted to `~/.deepcode/config.json`) |

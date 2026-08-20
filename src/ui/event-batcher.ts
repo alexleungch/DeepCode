@@ -1,10 +1,11 @@
 import type { EngineEvent } from '../events.js';
 
 /**
- * Streaming events (text-delta / thinking-delta / tool-progress) can arrive much faster than React
- * renders — every event used to trigger its own setState, so a long reply re-rendered the whole
- * TUI once per token. EventBatcher coalesces those high-frequency events into ONE batch per frame
- * (EVENT_BATCH_MS, trailing-edge) while applying control events immediately.
+ * Streaming events (text-delta / thinking-delta / tool-progress / tool-input-delta) can arrive much
+ * faster than React renders — every event used to trigger its own setState, so a long reply (or a
+ * long streamed tool-argument JSON) re-rendered the whole TUI once per token. EventBatcher
+ * coalesces those high-frequency events into ONE batch per frame (EVENT_BATCH_MS, trailing-edge)
+ * while applying control events immediately.
  *
  * Order is preserved: when a control event arrives, buffered deltas are flushed FIRST, then the
  * control event is applied. This matters because the state reducer appends deltas to the last
@@ -14,7 +15,7 @@ import type { EngineEvent } from '../events.js';
 export const EVENT_BATCH_MS = 16;
 
 /** Event types that are safe to delay by one frame (they only accumulate text). */
-const THROTTLED_EVENTS = new Set<EngineEvent['type']>(['text-delta', 'thinking-delta', 'tool-progress']);
+const THROTTLED_EVENTS = new Set<EngineEvent['type']>(['text-delta', 'thinking-delta', 'tool-progress', 'tool-input-delta']);
 
 export class EventBatcher {
   private pending: EngineEvent[] = [];

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ChatMessage, ContentBlockToolUse, LLMProvider } from '../providers/types.js';
+import { textContentOf } from '../providers/types.js';
 import { ToolExecutor } from '../tools/executor.js';
 import type { ToolContext, ToolDef } from '../tools/types.js';
 import { PermissionGate, riskOf, type ApprovalItem, type ApprovalResult } from '../tools/permission.js';
@@ -10,6 +11,7 @@ import type { DeepcodeConfig, ModelMeta } from '../config/types.js';
 import { planBreakpoints } from '../caching/breakpoint-planner.js';
 import { compressMessages, type CompactionPlan, type MemoryExtraction } from './compressor.js';
 import { estimateMessagesTokens } from './token-budget.js';
+import { expandAtRefs } from './at-refs.js';
 import type { EngineEventSink } from '../events.js';
 import type { SessionRecord } from '../session/types.js';
 import type { SessionStore } from '../session/store.js';
@@ -28,6 +30,8 @@ interface AgentLoopDeps {
   todoStore: TodoStore;
   emit: EngineEventSink;
   systemPrompt: string;
+  /** Workspace cwd used to resolve `@file` references in user input */
+  workspace?: string;
   /** Approval handler (TUI dialog / --print stdin / test injection) */
   approvalHandler: (items: ApprovalItem[]) => Promise<ApprovalResult>;
   /** Extract facts from compacted turns (Agent Memory integration; skipped if absent) */
@@ -63,7 +67,12 @@ export function maxOutputTokens(modelMeta: ModelMeta): number {
 export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Promise<TurnResult> {
   const { config, provider, registry, executor, gate, usage, session, sessionStore, emit, systemPrompt, approvalHandler, signal } = deps;
   const messages: ChatMessage[] = [...session.messages];
-  messages.push({ role: 'user', content: userInput });
+  // Expand `@file` references: the MODEL receives the original text plus `<context>`
+  // blocks with the referenced file contents; the DISPLAY event keeps the text exactly
+  // as the user typed it (the TUI shows `@src/a.ts`, not a wall of file contents).
+  // The session stores the expanded message, so resumption/compaction keep the content.
+  const atExpansion = expandAtRefs(userInput, deps.workspace ?? process.cwd());
+  messages.push({ role: 'user', content: atExpansion.expanded });
   emit({ type: 'message', message: { role: 'user', content: userInput }, source: 'user' });
   sessionStore.appendMessage(session.id, messages[messages.length - 1]!);
 
@@ -73,7 +82,14 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
   // by the TUI reducer to keep the status-bar ctx bar and /context panel in sync as the conversation grows.
   const emitContext = () => emit({ type: 'context', ratio: estimateMessagesTokens(messages) / windowTokens, window: windowTokens });
   const compactAtTokens = Math.floor(windowTokens * config.context.compactAt);
-  let turns = 0;
+  const maxTurns = config.agent.maxTurns;
+  const maxTotalTurns = config.agent.maxTotalTurns ?? Math.max(maxTurns, 100);
+  const compactEveryTurns = config.context.compactEveryTurns ?? 0;
+  // Two counters: `segmentTurns` counts turns since the last compaction (compaction resets it, so a
+  // long task survives past `maxTurns` as long as each segment makes progress); `totalTurns` is the
+  // hard safety backstop that can never be reset — a runaway tool loop must eventually stop.
+  let totalTurns = 0;
+  let segmentTurns = 0;
   let interrupted = false;
   let finalStopReason = 'end_turn';
   const aborted = new AbortController();
@@ -83,11 +99,108 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
   signal.addEventListener('abort', onAbort, { once: true });
 
   try {
-    for (turns = 0; turns < config.agent.maxTurns; ) {
-      turns++;
-      emit({ type: 'turn-start', turn: turns });
+    for (totalTurns = 0; totalTurns < maxTotalTurns; ) {
+      // Segment cap check FIRST (top of the loop, before the increment): this reproduces the
+      // original `for (turns = 0; turns < maxTurns;)` semantics — exactly `maxTurns` model calls
+      // per segment. A successful compaction resets `segmentTurns` to 0, so a productive task
+      // passes straight through here and keeps going.
+      //
+      // Before giving up we make one last-ditch attempt with very aggressive parameters: a
+      // lower target ratio, fewer kept recent turns, and tighter tool-result clipping. If even
+      // THIS cannot reduce the conversation, the task really is stuck — emit the diagnostic
+      // error and stop. The `maxTotalTurns` backstop in the for-condition catches any runaway
+      // compaction loop.
+      if (segmentTurns >= maxTurns) {
+        if (config.context.autoCompact) {
+          // Strategy 1: aggressive per-turn summarize compaction (handles multi-prompt conversations).
+          const lastResort = compressMessages(messages, {
+            targetRatio: 0.3,
+            keepRecentTurns: Math.max(2, config.context.keepRecentTurns - 3),
+            maxSummaryTokens: config.context.maxSummaryTokens,
+            maxToolResultChars: 2000,
+            extractFacts: deps.extractFacts,
+          });
+          if (lastResort.removedTurns > 0) {
+            messages.splice(0, messages.length, ...lastResort.messages);
+            sessionStore.appendCompaction(session.id, lastResort);
+            emit({ type: 'compacted', plan: lastResort });
+            emitContext();
+            segmentTurns = 0;
+            continue;
+          }
+          // Strategy 2: middle-fold (handles single-prompt long tool-using tasks where the
+          // per-turn compressor finds no foldable user→assistant turns). Keep the first
+          // message (anchor) + the most recent 4 messages as live context, summarize the rest.
+          const mid = middleFoldMessages(messages, { keepRecentMessages: 4 });
+          if (mid.removedTurns > 0) {
+            messages.splice(0, messages.length, ...mid.messages);
+            const foldPlan = {
+              messages: mid.messages,
+              summary: '<summary>middle-fold at segment boundary</summary>',
+              removedTurns: mid.removedTurns,
+              tokensBefore: mid.tokensBefore,
+              tokensAfter: mid.tokensAfter,
+              savedTokens: mid.tokensBefore - mid.tokensAfter,
+              keptRecentTurns: 0,
+              movedToMemory: [],
+            };
+            sessionStore.appendCompaction(session.id, foldPlan);
+            emit({ type: 'compacted', plan: foldPlan });
+            emitContext();
+            segmentTurns = 0;
+            continue;
+          }
+        }
+        // Both compaction strategies (when attempted) failed. Try delegating the remaining work
+        // to a subagent with its own turn budget — strategy 3 from src/agent/subagent.ts:65-68.
+        // The subagent runs in a fresh context, so a single-prompt tool-loop task that refuses to
+        // fold can finish there instead of silently abandoning the user mid-work. Falls back to a
+        // reset+continue (with the existing warning) if delegation is unavailable or itself fails;
+        // the maxTotalTurns backstop below is the genuine runaway guard.
+        const canDelegate =
+          !!deps.subagentRuntime &&
+          config.subagents.enabled !== false &&
+          (deps.subagentDepth ?? 0) < config.subagents.maxDepth;
+        if (canDelegate) {
+          const delegationTask = buildDelegationTask(messages, maxTurns);
+          try {
+            const subResult = await deps.subagentRuntime!.spawn({
+              task: delegationTask,
+              label: 'segment-cap delegation',
+              depth: (deps.subagentDepth ?? 0) + 1,
+              workspace: session.workspace,
+            });
+            if (!subResult.error && subResult.report) {
+              const delegatedMessage: ChatMessage = { role: 'assistant', content: subResult.report };
+              messages.push(delegatedMessage);
+              sessionStore.appendMessage(session.id, delegatedMessage);
+              emit({ type: 'message', message: delegatedMessage, source: 'assistant' });
+              emit({ type: 'delegated', subagentId: subResult.subagentId, label: subResult.label, report: subResult.report, turns: subResult.turns });
+              finalStopReason = 'delegated';
+              emit({ type: 'turn-end', turn: totalTurns + 1, stopReason: finalStopReason });
+              emitContext();
+              break;
+            }
+          } catch {
+            // Delegation threw — fall through to the reset+continue fallback below.
+          }
+        }
+        // Fallback: warn (informational), reset the per-segment counter, and continue. The
+        // task is genuinely stuck only if even the hard maxTotalTurns backstop fires below.
+        emit({
+          type: 'error',
+          message: config.context.autoCompact
+            ? `Reached the configured agent.maxTurns limit (${maxTurns}) within a segment (compaction did not reduce the conversation). Continuing; the hard maxTotalTurns backstop (${maxTotalTurns}) will stop a truly stuck task.`
+            : `Reached the configured agent.maxTurns limit (${maxTurns}) within a segment (auto-compaction is disabled). Continuing; the hard maxTotalTurns backstop (${maxTotalTurns}) will stop a truly stuck task.`,
+        });
+        segmentTurns = 0;
+        continue;
+      }
+      totalTurns++;
+      segmentTurns++;
+      emit({ type: 'turn-start', turn: totalTurns });
 
-      // —— pre-request compaction check ——
+      // —— pre-request compaction check (token-based) ——
       if (config.context.autoCompact && estimateMessagesTokens(messages) > compactAtTokens) {
         const plan = compressMessages(messages, {
           targetRatio: 0.6,
@@ -107,6 +220,28 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
             finalStopReason = 'over-budget';
             break;
           }
+        }
+      }
+
+      // —— pre-request turn-based compaction (strategy 1: state checkpoint & counter reset) ——
+      // Every `compactEveryTurns` turns, force a compaction. If it actually removed turns, reset the
+      // per-segment counter so the task can continue. If there is nothing to compress (e.g. the whole
+      // conversation is a single giant turn), we cannot reset — fall through and let the maxTurns
+      // segment cap trip instead of looping forever.
+      if (compactEveryTurns > 0 && segmentTurns >= compactEveryTurns) {
+        const plan = compressMessages(messages, {
+          targetRatio: 0.6,
+          keepRecentTurns: config.context.keepRecentTurns,
+          maxSummaryTokens: config.context.maxSummaryTokens,
+          maxToolResultChars: 8000,
+          extractFacts: deps.extractFacts,
+        });
+        if (plan.removedTurns > 0) {
+          messages.splice(0, messages.length, ...plan.messages);
+          sessionStore.appendCompaction(session.id, plan);
+          emit({ type: 'compacted', plan });
+          emitContext();
+          segmentTurns = 0; // counter reset — the task keeps going with a fresh budget
         }
       }
 
@@ -149,7 +284,7 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
       // content or tool call). Persisting it would poison the next request: OpenAI-compatible APIs
       // reject an assistant message with neither content nor tool_calls ("Invalid assistant message").
       if (toolUses.length === 0 && !hasVisibleContent(response.message)) {
-        emit({ type: 'turn-end', turn: turns + 1, stopReason: finalStopReason });
+        emit({ type: 'turn-end', turn: totalTurns + 1, stopReason: finalStopReason });
         emitContext();
         break;
       }
@@ -159,7 +294,7 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
       emit({ type: 'message', message: response.message, source: 'assistant' });
 
       if (toolUses.length === 0) {
-        emit({ type: 'turn-end', turn: turns + 1, stopReason: finalStopReason });
+        emit({ type: 'turn-end', turn: totalTurns + 1, stopReason: finalStopReason });
         emitContext();
         break;
       }
@@ -183,12 +318,25 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
         // When the abort came from ESC (interrupt signal), report it as an interrupt so callers
         // (engine.runTurn, the TUI) can distinguish "user interrupted" from "tools denied".
         if (signal.aborted) interrupted = true;
-        emit({ type: 'turn-end', turn: turns + 1, stopReason: finalStopReason });
+        emit({ type: 'turn-end', turn: totalTurns + 1, stopReason: finalStopReason });
         emitContext();
         break;
       }
-      emit({ type: 'turn-end', turn: turns + 1, stopReason: finalStopReason });
+      emit({ type: 'turn-end', turn: totalTurns + 1, stopReason: finalStopReason });
       emitContext();
+    }
+
+    // —— hard total-turns backstop ——
+    // The segment boundary above already emits its own diagnostic when the per-segment cap is hit
+    // and compaction cannot reduce the conversation. Here we only handle the global backstop:
+    // `maxTotalTurns` is the absolute ceiling that can never be reset, so a runaway compaction
+    // loop or a pathologically irreducible task still terminates eventually.
+    if (totalTurns >= maxTotalTurns && !interrupted) {
+      finalStopReason = 'max-total-turns';
+      emit({
+        type: 'error',
+        message: `Reached the hard total-turn limit (${maxTotalTurns}) for this request. The task may be incomplete — send another message to continue, or raise agent.maxTurns / agent.maxTotalTurns in your config.`,
+      });
     }
   } finally {
     signal.removeEventListener('abort', onAbort);
@@ -197,7 +345,7 @@ export async function runAgentTurn(deps: AgentLoopDeps, userInput: string): Prom
     session.todos = deps.todoStore.snapshot();
   }
 
-  return { messages, turns, interrupted, stopReason: finalStopReason };
+  return { messages, turns: totalTurns, interrupted, stopReason: finalStopReason };
 }
 
 async function consumeStream(
@@ -232,6 +380,87 @@ async function consumeStream(
 function hasVisibleContent(message: ChatMessage): boolean {
   if (typeof message.content === 'string') return message.content.trim().length > 0;
   return message.content.some((b) => (b.type === 'text' && b.text.trim().length > 0) || b.type === 'tool_use');
+}
+
+/**
+ * Middle-fold: for conversations with a single user prompt followed by many tool rounds (where
+ * the standard per-turn compressor finds no foldable user→assistant turns), summarize the
+ * MIDDLE of the conversation while keeping the first message (anchor) and the most recent N
+ * messages (live context). Used as a last-resort compaction at the segment boundary so a long
+ * tool-using task never silently stops at `agent.maxTurns` just because there is nothing
+ * foldable in the traditional sense.
+ */
+function middleFoldMessages(
+  messages: ChatMessage[],
+  opts: { keepRecentMessages: number },
+): { messages: ChatMessage[]; removedTurns: number; tokensBefore: number; tokensAfter: number } {
+  const tokensBefore = estimateMessagesTokens(messages);
+  // Need at least anchor + 1 middle message + 1 recent for the fold to do anything.
+  if (messages.length <= opts.keepRecentMessages + 2) {
+    return { messages, removedTurns: 0, tokensBefore, tokensAfter: tokensBefore };
+  }
+  const anchorEnd = 1;
+  const recentStart = messages.length - opts.keepRecentMessages;
+  const middle = messages.slice(anchorEnd, recentStart);
+  if (middle.length === 0) {
+    return { messages, removedTurns: 0, tokensBefore, tokensAfter: tokensBefore };
+  }
+  const summaryParts: string[] = [];
+  for (const m of middle) {
+    const text = textContentOf(m).trim();
+    if (!text) continue;
+    const prefix = m.role === 'assistant' ? 'A' : 'U';
+    if (text.length > 600) {
+      summaryParts.push(`${prefix}: ${text.slice(0, 600)}…`);
+    } else {
+      summaryParts.push(`${prefix}: ${text}`);
+    }
+  }
+  const summaryBody = `# Summary of earlier tool work\n${summaryParts.join('\n')}`;
+  const summaryMessage: ChatMessage = {
+    role: 'user',
+    content: `<summary>\n${summaryBody}\n</summary>`,
+  };
+  const newMessages: ChatMessage[] = [messages[0]!, summaryMessage, ...messages.slice(recentStart)];
+  const tokensAfter = estimateMessagesTokens(newMessages);
+  if (tokensAfter >= tokensBefore) {
+    return { messages, removedTurns: 0, tokensBefore, tokensAfter: tokensBefore };
+  }
+  return { messages: newMessages, removedTurns: middle.length, tokensBefore, tokensAfter };
+}
+
+/**
+ * Build the task prompt for a subagent that takes over when the parent's segment cap trips and
+ * compaction cannot reduce the conversation. The subagent runs in a fresh context, so it needs
+ * (a) the user's original request and (b) a compact recap of recent exchanges so it doesn't
+ * redo work that's already done. Tool results from the parent's session are not forwarded — the
+ * subagent re-reads files / re-runs commands as needed in its own context.
+ */
+function buildDelegationTask(messages: ChatMessage[], maxTurns: number): string {
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+  const userText = lastUser
+    ? (typeof lastUser.content === 'string' ? lastUser.content : textContentOf(lastUser))
+    : '(no user message found)';
+  const recent = messages.slice(-8);
+  const recap = recent
+    .map((m) => {
+      const text = textContentOf(m).trim();
+      if (!text) return null;
+      const label = m.role === 'user' ? 'U' : m.role === 'assistant' ? 'A' : m.role === 'system' ? 'S' : '?';
+      const trimmed = text.length > 300 ? text.slice(0, 300) + '…' : text;
+      return `${label}: ${trimmed}`;
+    })
+    .filter((s): s is string => Boolean(s))
+    .join('\n');
+  return `The parent agent hit its per-segment turn cap (${maxTurns}) and compaction could not reduce the conversation, so it is delegating the remaining work to you in a fresh context.
+
+# Original request
+${userText}
+
+# Recent exchanges (recap)
+${recap}
+
+Continue the task to completion in your fresh context. You may re-read files / re-run commands as needed — prior tool results are NOT in your context. When done, output a concise ## Report describing what you accomplished, what verification you ran (e.g. tests/build), and any remaining issues or follow-up steps for the user.`;
 }
 
 /** Result of a tool batch: observation messages to append, plus whether the batch was aborted. */

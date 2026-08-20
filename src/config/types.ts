@@ -7,6 +7,7 @@ export const providerIds = [
   'gemini',
   'qwen',
   'ollama',
+  'openrouter',
   'openai-compat',
 ] as const;
 
@@ -96,13 +97,46 @@ export interface TelegramConfig {
 
 /** TUI appearance settings (see src/ui/themes.ts for the built-in registry) */
 export interface UiConfig {
-  /** TUI theme id (default, dracula, gruvbox, nord, solarized, matrix) */
+  /** TUI theme id (default, dracula, gruvbox, nord, solarized, matrix, light, gruvbox-light).
+   *  When unset, the TUI auto-detects the terminal background and uses a light theme
+   *  on light terminals (see src/ui/background.ts). */
   theme?: string;
+}
+
+/** Prompt engineering knobs (see docs/PROMPT_SYSTEM.md). All prompt text stays cache-prefix stable. */
+export interface PromptConfig {
+  /** Compactness directive in the output contract (dimension 1: token optimization) */
+  outputStyle: 'concise' | 'balanced' | 'detailed';
+  /** Soft cap on each assistant text reply in characters; 0 = disabled */
+  maxResponseChars: number;
+  /** Few-shot example bank injected into the output contract (dimension 3; max 5, keep short) */
+  examples: string[];
+  /** Explicit completion protocol section: when to end a turn, never ask redundant confirmations (dimension 2) */
+  completionProtocol: boolean;
+  /** Verify-on-done contract: run checks and quote real output before declaring completion (dimension 4) */
+  verifyOnDone: boolean;
+  /** Eval quality gate thresholds (dimension 5: harness) */
+  quality: {
+    /** Minimum tool success rate (tool-result.isError ratio) */
+    minToolSuccessRate: number;
+    /** Maximum turns per eval task */
+    maxTurns: number;
+    /** Maximum total tokens per eval task (input+output) */
+    maxTokensPerTask: number;
+    /** Require the replayed UI state to be fully settled (spinner-stuck invariant) */
+    requireSettled: boolean;
+    /** Self-feedback retry budget: how many times a failing task may re-run with a feedback hint */
+    maxRetriesOnFail: number;
+  };
 }
 
 export interface AgentConfig {
   /** Max agent loop turns per conversation */
   maxTurns: number;
+  /** Hard safety cap on TOTAL turns across compactions within a single runTurn call.
+   *  Compaction resets the per-segment counter (maxTurns), but a runaway tool loop must
+   *  eventually stop; this is that backstop. */
+  maxTotalTurns: number;
   /** Max concurrency for parallel tool_use execution */
   maxParallelTools: number;
   /** Per-tool timeout for bash/browser etc. (ms) */
@@ -114,6 +148,9 @@ export interface ContextConfig {
   maxTokens: number;
   /** Compaction trigger threshold (usage ratio 0-1) */
   compactAt: number;
+  /** Force a compaction every N turns (0 = disabled). This resets the per-segment turn counter,
+   *  so a long agentic task is not capped by agent.maxTurns just because it takes many tool steps. */
+  compactEveryTurns: number;
   autoCompact: boolean;
   /** Most recent N turns kept verbatim when compacting */
   keepRecentTurns: number;
@@ -126,6 +163,10 @@ export interface SubagentConfig {
   maxConcurrent: number;
   maxDepth: number;
   worktree: WorktreeMode;
+  /** Independent turn budget for each sub-agent (does NOT consume the main agent's counter).
+   *  A sub-agent that needs many tool steps (tracing, grep loops, builds) can run this many turns
+   *  before it must wrap up with a report. */
+  maxTurns: number;
 }
 
 export interface MemoryConfig {
@@ -165,6 +206,8 @@ export interface DeepcodeConfig {
     gemini?: ProviderEndpointConfig;
     qwen?: ProviderEndpointConfig;
     ollama?: { baseUrl?: string; keepAlive?: string };
+    /** OpenRouter gateway (OpenAI-compatible API at https://openrouter.ai/api/v1) */
+    openrouter?: ProviderEndpointConfig;
     'openai-compat'?: ProviderEndpointConfig & { name?: string };
   };
   permissions: PermissionConfig;
@@ -176,6 +219,7 @@ export interface DeepcodeConfig {
   mcpServers: Record<string, McpServerConfig>;
   skills: SkillConfig;
   plugins: PluginConfig;
+  prompt: PromptConfig;
   telegram?: TelegramConfig;
   ui?: UiConfig;
 }
@@ -214,6 +258,7 @@ export const deepcodeConfigSchema = z
       gemini: providerEndpointSchema.optional(),
       qwen: providerEndpointSchema.optional(),
       ollama: z.object({ baseUrl: z.string().optional(), keepAlive: z.string().optional() }).optional(),
+      openrouter: providerEndpointSchema.optional(),
       'openai-compat': providerEndpointSchema.extend({ name: z.string().optional() }).optional(),
     }),
     permissions: z.object({
@@ -225,6 +270,7 @@ export const deepcodeConfigSchema = z
     context: z.object({
       maxTokens: z.number().int().positive(),
       compactAt: z.number().min(0.1).max(0.99),
+      compactEveryTurns: z.number().int().min(0).max(200),
       autoCompact: z.boolean(),
       keepRecentTurns: z.number().int().min(1).max(20),
       maxSummaryTokens: z.number().int().positive(),
@@ -234,6 +280,7 @@ export const deepcodeConfigSchema = z
       maxConcurrent: z.number().int().min(1).max(16),
       maxDepth: z.number().int().min(0).max(8),
       worktree: z.enum(worktreeModes),
+      maxTurns: z.number().int().min(1).max(200),
     }),
     memory: z.object({
       enabled: z.boolean(),
@@ -243,6 +290,7 @@ export const deepcodeConfigSchema = z
     }),
     agent: z.object({
       maxTurns: z.number().int().min(1).max(200),
+      maxTotalTurns: z.number().int().min(1).max(2000),
       maxParallelTools: z.number().int().min(1).max(16),
       toolTimeoutMs: z.number().int().positive(),
     }),
@@ -255,6 +303,20 @@ export const deepcodeConfigSchema = z
     plugins: z.object({
       enabled: z.boolean(),
       directories: z.array(z.string()),
+    }),
+    prompt: z.object({
+      outputStyle: z.enum(['concise', 'balanced', 'detailed']),
+      maxResponseChars: z.number().int().min(0).max(100_000),
+      examples: z.array(z.string().max(2000)).max(5),
+      completionProtocol: z.boolean(),
+      verifyOnDone: z.boolean(),
+      quality: z.object({
+        minToolSuccessRate: z.number().min(0).max(1),
+        maxTurns: z.number().int().min(1).max(2000),
+        maxTokensPerTask: z.number().int().positive(),
+        requireSettled: z.boolean(),
+        maxRetriesOnFail: z.number().int().min(0).max(10),
+      }),
     }),
     telegram: z
       .object({
